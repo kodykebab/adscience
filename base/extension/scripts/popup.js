@@ -12,7 +12,7 @@ import { pipeline, env } from './transformers/transformers.min.js';
 // ============================================================
 
 // Setup environment for MV3 local ML
-env.allowLocalModels = false; 
+env.allowLocalModels = false;
 env.useBrowserCache = false; // Fix: use Chrome's native disk HTTP cache instead of buggy Cache API
 env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('scripts/transformers/');
 
@@ -65,11 +65,11 @@ document.addEventListener("DOMContentLoaded", () => {
   initAesthetics();
   initBlurLoad();
   initBlurText("idle-heading", 150);
-  
+
   // Reactivity texts
   const typingTexts = [
-    "Private Attention Market", 
-    "Zero-Knowledge Matching", 
+    "Private Attention Market",
+    "Zero-Knowledge Matching",
     "FHE Enabled Bidding"
   ];
   initTypingEffect("header-subtitle", typingTexts, 60, 40, 2000);
@@ -157,8 +157,53 @@ function showDomains(domains) {
 
 // ============================================================
 //  PHASE B: LLM Classification (REAL Local ML via WebAssembly)
+//  Fix: Classify each domain individually to avoid noisy
+//  single-string classification, then aggregate scores.
 // ============================================================
 let classifierPipeline = null;
+
+// Map well-known domains to categories directly to help the model
+const DOMAIN_HINTS = {
+  "claude.ai": "ai",
+  "openai.com": "ai",
+  "chat.openai.com": "ai",
+  "bard.google.com": "ai",
+  "huggingface.co": "ai",
+  "connect.phantom.app": "crypto",
+  "phantom.app": "crypto",
+  "metamask.io": "crypto",
+  "etherscan.io": "crypto",
+  "coinbase.com": "crypto",
+  "binance.com": "crypto",
+  "uniswap.org": "crypto",
+  "opensea.io": "crypto",
+  "github.com": "dev",
+  "stackoverflow.com": "dev",
+  "npmjs.com": "dev",
+  "localhost": "dev",
+  "vercel.app": "dev",
+  "netlify.app": "dev",
+  "bloomberg.com": "finance",
+  "yahoo.com/finance": "finance",
+  "robinhood.com": "finance",
+  "twitch.tv": "gaming",
+  "steampowered.com": "gaming",
+  "store.steampowered.com": "gaming",
+  "epicgames.com": "gaming",
+  "discord.com": "gaming",
+};
+
+// Domains that are too generic to classify — skip them
+const GENERIC_DOMAINS = new Set([
+  "google.com", "accounts.google.com", "mail.google.com",
+  "chromewebstore.google.com", "chrome.google.com",
+  "appleid.apple.com", "apple.com",
+  "microsoft.com", "login.microsoftonline.com",
+  "youtube.com", "wikipedia.org",
+  "amazon.com", "facebook.com", "instagram.com",
+  "twitter.com", "x.com", "reddit.com",
+  "linkedin.com",
+]);
 
 async function startClassification() {
   goToState("state-classifying");
@@ -168,39 +213,76 @@ async function startClassification() {
     if (!classifierPipeline) {
       document.querySelector("#state-classifying h2").textContent = "Loading AI Model...";
       document.querySelector("#state-classifying .panel-desc").textContent = "Downloading & caching model (~90MB). Next runs will be instant.";
-      
+
       // Using a fast distilled zero-shot classification model
       classifierPipeline = await pipeline('zero-shot-classification', 'Xenova/mobilebert-uncased-mnli');
     }
 
     document.querySelector("#state-classifying h2").textContent = "Running Inference...";
-    document.querySelector("#state-classifying .panel-desc").textContent = "Mapping history linearly onto categories...";
+    document.querySelector("#state-classifying .panel-desc").textContent = "Classifying each domain individually...";
 
-    // 2. Grab Domains Text 
-    const textToClassify = extractedDomains.slice(0, 50).join(", ");
-    if (!textToClassify) {
+    // 2. Filter domains — remove generic/auth domains that add noise
+    const domainsToClassify = extractedDomains.slice(0, 50).filter(d => !GENERIC_DOMAINS.has(d));
+
+    if (domainsToClassify.length === 0) {
       userVector = [0, 0, 0, 0, 0];
       showInterests(userVector);
       return;
     }
 
-    // 3. Local Model Inference for exact labels (Multi-Label)
-    const result = await classifierPipeline(textToClassify, CATEGORIES, { multi_label: true });
-    
-    console.log("Local ML Zero-Shot Results:", result);
+    // 3. Aggregate scores across all domains
+    const categoryScores = {};
+    CATEGORIES.forEach(cat => { categoryScores[cat] = 0; });
+    let classifiedCount = 0;
 
-    // 4. Map into a binary vector by score threshold (e.g. > 0.2 means likely active interest)
-    userVector = CATEGORIES.map((cat) => {
-      const idx = result.labels.indexOf(cat);
-      if (idx !== -1 && result.scores[idx] > 0.2) {
-        return 1;
+    for (const domain of domainsToClassify) {
+      // Check hardcoded hints first (fast path)
+      const hint = DOMAIN_HINTS[domain];
+      if (hint) {
+        categoryScores[hint] += 1.0;
+        classifiedCount++;
+        console.log(`[Hint] ${domain} → ${hint}`);
+        continue;
       }
-      return 0;
+
+      // Build a natural language sentence for the NLI model (much better than raw domain)
+      const sentence = `The user frequently visits the website ${domain}`;
+
+      try {
+        const result = await classifierPipeline(sentence, CATEGORIES, { multi_label: true });
+        console.log(`[ML] ${domain}:`, result.labels[0], result.scores[0].toFixed(3));
+
+        // Only count the top label if its score is confident enough (> 0.35)
+        result.labels.forEach((label, idx) => {
+          if (result.scores[idx] > 0.35) {
+            categoryScores[label] += result.scores[idx];
+          }
+        });
+        classifiedCount++;
+      } catch (e) {
+        console.warn(`Skipping domain ${domain}:`, e);
+      }
+
+      // Update progress
+      document.querySelector("#state-classifying .panel-desc").textContent =
+        `Classifying domain ${classifiedCount + 1}/${domainsToClassify.length}...`;
+    }
+
+    console.log("Aggregated Category Scores:", categoryScores);
+
+    // 4. Normalize scores and apply threshold
+    //    A category is "active" if its average score across all domains is meaningful
+    const threshold = 0.4; // Higher threshold to avoid false positives
+    const maxScore = Math.max(...Object.values(categoryScores), 1); // avoid div by 0
+
+    userVector = CATEGORIES.map((cat) => {
+      const normalizedScore = categoryScores[cat] / maxScore;
+      return normalizedScore >= threshold ? 1 : 0;
     });
 
   } catch (err) {
     console.error("Local ML error:", err);
-    userVector = [0, 0, 0, 0, 0]; 
+    userVector = [0, 0, 0, 0, 0];
   }
 
   showInterests(userVector);
@@ -231,25 +313,25 @@ async function startEncryption() {
   const hexBlob = document.getElementById("hex-blob");
   hexBlob.textContent = "Locating Active EAX Next.js Instance...\n";
 
-  chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-      if (!tabs || tabs.length === 0) return;
-      
-      chrome.tabs.sendMessage(tabs[0].id, { type: "EAX_USER_VECTOR_TO_APP", vector: userVector }, function(response) {
-          if (chrome.runtime.lastError) {
-              hexBlob.textContent += "Error: Connect securely via localhost:3000 to trigger CoFHE primitives.";
-          } else {
-              hexBlob.textContent += "Vector securely injected into Metamask context.\n";
-              
-              // Automatically push to results to show pending interaction 
-              setTimeout(() => {
-                 goToState("state-results");
-                 const el = document.getElementById("res-winner");
-                 el.textContent = "Awaiting Fhenix Tx";
-                 document.getElementById("res-advertisers").textContent = "On-Chain";
-                 document.getElementById("res-payout").innerHTML = `Confirm in wallet`;
-              }, 1200);
-          }
-      });
+  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+    if (!tabs || tabs.length === 0) return;
+
+    chrome.tabs.sendMessage(tabs[0].id, { type: "EAX_USER_VECTOR_TO_APP", vector: userVector }, function (response) {
+      if (chrome.runtime.lastError) {
+        hexBlob.textContent += "Error: Connect securely via localhost:3000 to trigger CoFHE primitives.";
+      } else {
+        hexBlob.textContent += "Vector securely injected into Metamask context.\n";
+
+        // Automatically push to results to show pending interaction 
+        setTimeout(() => {
+          goToState("state-results");
+          const el = document.getElementById("res-winner");
+          el.textContent = "Awaiting Fhenix Tx";
+          document.getElementById("res-advertisers").textContent = "On-Chain";
+          document.getElementById("res-payout").innerHTML = `Confirm in wallet`;
+        }, 1200);
+      }
+    });
   });
 }
 
@@ -294,7 +376,7 @@ function decryptText(element, finalString, speed = 30) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
   let iterations = 0;
   element.classList.add("decrypt-text");
-  
+
   const interval = setInterval(() => {
     element.innerText = finalString
       .split("")
@@ -305,12 +387,12 @@ function decryptText(element, finalString, speed = 30) {
         return chars[Math.floor(Math.random() * chars.length)];
       })
       .join("");
-    
+
     if (iterations >= finalString.length) {
       clearInterval(interval);
       element.classList.remove("decrypt-text");
     }
-    
+
     iterations += 1 / 3;
   }, speed);
 }
@@ -322,7 +404,7 @@ function animateCountUp(element, endValue, duration) {
     const progress = Math.min((timestamp - startTimestamp) / duration, 1);
     const easeOut = 1 - Math.pow(1 - progress, 4);
     element.innerText = Math.floor(easeOut * endValue);
-    
+
     if (progress < 1) {
       window.requestAnimationFrame(step);
     } else {
@@ -336,7 +418,7 @@ function animateCountUp(element, endValue, duration) {
 function initTypingEffect(elementId, texts, typeSpeed = 50, deleteSpeed = 30, pause = 1500) {
   const el = document.getElementById(elementId);
   if (!el) return;
-  
+
   el.classList.add("typing-cursor");
   let textIndex = 0;
   let charIndex = 0;
@@ -365,7 +447,7 @@ function initTypingEffect(elementId, texts, typeSpeed = 50, deleteSpeed = 30, pa
 
     setTimeout(type, speed);
   }
-  
+
   // Clear initial text and start after slight delay
   el.textContent = "";
   setTimeout(type, 300);
@@ -384,10 +466,10 @@ function initBlurLoad() {
 function initBlurText(elementId, delay = 100) {
   const el = document.getElementById(elementId);
   if (!el) return;
-  
+
   const words = el.textContent.split(' ');
   el.innerHTML = '';
-  
+
   words.forEach((word, index) => {
     const span = document.createElement('span');
     span.textContent = word + (index < words.length - 1 ? '\u00A0' : ''); // non-breaking space
@@ -395,11 +477,11 @@ function initBlurText(elementId, delay = 100) {
     span.style.filter = 'blur(10px)';
     span.style.transform = 'translateY(5px)';
     span.style.display = 'inline-block';
-    
+
     // Animate using the existing keyframes
     span.style.animation = `blurRevealEffect 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards`;
     span.style.animationDelay = `${400 + index * delay}ms`; // start after main card load
-    
+
     el.appendChild(span);
   });
 }
