@@ -3,19 +3,25 @@
  * 
  * Contract interactions: initEAX + runMatch
  * Handles: wallet connection, CoFHE encryption, on-chain matching, threshold decryption, reveal
+ * 
+ * v2: Dynamic weighted vectors (0–100), dual decryption (winner + score),
+ *     score-proportional payouts.
  */
 
 // Minimal ABI — only the functions/events the SDK needs
 const EAX_ABI = [
   "function matchIntent(tuple(uint256 ctHash, uint8 securityZone, uint8 utype, bytes signature)[] calldata _encVec) external returns (uint256)",
-  "function revealMatch(uint256 _taskId, uint8 _winnerIndex, bytes calldata _winnerSig) external",
+  "function revealMatch(uint256 _taskId, uint8 _winnerIndex, bytes calldata _winnerSig, uint64 _winnerScore, bytes calldata _scoreSig) external",
   "function recordImpression() external",
   "function activeAdvertiser(address) view returns (uint8)",
   "function hasActiveMatch(address) view returns (bool)",
-  "function advertisers(uint256) view returns (uint64[5] vector, uint64 bid, address addr, bool active)",
+  "function matchScore(address) view returns (uint64)",
+  "function matchMaxScore(address) view returns (uint64)",
+  "function getAdvertiser(uint256) view returns (uint64[5] vector, uint64 bid, address addr, bool active)",
+  "event AdvertiserRegistered(uint256 indexed id, address indexed addr, uint64 bid)",
   "event MatchSubmitted(uint256 indexed taskId, address indexed user)",
-  "event MatchRevealed(address indexed user, uint8 advertiserId)",
-  "event ImpressionRecorded(address indexed user, uint8 advertiserId, uint64 payout)",
+  "event MatchRevealed(address indexed user, uint8 advertiserId, uint64 score, uint64 maxScore)",
+  "event ImpressionRecorded(address indexed user, uint8 advertiserId, uint256 payoutWei)",
 ];
 
 // Module state
@@ -59,18 +65,18 @@ export async function initEAX({ contractAddress, backendUrl }) {
 
 /**
  * Run the full encrypted matching pipeline:
- * 1. Wait for extension to deliver intent vector
+ * 1. Wait for extension to deliver weighted intent vector (0–100 per category)
  * 2. Encrypt via CoFHE ZK proof pipeline
  * 3. Submit matchIntent() on-chain
- * 4. Await threshold decryption
- * 5. Call revealMatch() to assign activeAdvertiser
+ * 4. Await threshold decryption of BOTH winner index and match score
+ * 5. Call revealMatch() to assign activeAdvertiser with score data
  * 
- * @returns {{ advertiserId: number, taskId: string, txHash: string }}
+ * @returns {{ advertiserId: number, score: number, maxScore: number, quality: number, taskId: string, txHash: string }}
  */
 export async function runMatch() {
   if (!_contract) throw new Error("Call initEAX() first");
 
-  // Step 1: Get vector from extension via postMessage bridge
+  // Step 1: Get weighted vector from extension via postMessage bridge
   const vector = await _waitForExtensionVector();
 
   // Step 2: Encrypt via CoFHE
@@ -116,49 +122,46 @@ export async function runMatch() {
 
   if (taskId === undefined) throw new Error("Could not parse MatchSubmitted event");
 
-  // Step 4: Read encrypted handle + threshold decrypt
+  // Step 4: Read both encrypted handles + threshold decrypt
   const task = await _contract.tasks(taskId);
-  const winnerCtHash = task[0]; // bytes32 (euint8 handle)
+  const winnerCtHash = task[0]; // euint8 handle (winnerIndex)
+  const scoreCtHash  = task[1]; // euint64 handle (winnerScore)
 
   await cofheClient.permits.getOrCreateSelfPermit();
 
-  // Retry loop: CoFHE coprocessor processes FHE ops asynchronously after tx confirms.
-  // 428 = "not ready yet". We retry with backoff until the result handle is available.
-  let winnerResult;
-  const MAX_RETRIES = 12;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      winnerResult = await cofheClient
-        .decryptForTx(winnerCtHash)
-        .withPermit()
-        .execute();
-      break;
-    } catch (err) {
-      const is428 = err?.message?.includes("428") || err?.message?.includes("Precondition");
-      if (is428 && attempt < MAX_RETRIES) {
-        console.log(`[EAX SDK] CoFHE still computing (attempt ${attempt}/${MAX_RETRIES}). Retrying in 5s...`);
-        await new Promise(r => setTimeout(r, 5000));
-        continue;
-      }
-      throw err;
-    }
-  }
+  // Decrypt winner index
+  const winnerResult = await _decryptWithRetry(cofheClient, winnerCtHash, "winner index");
+  // Decrypt match score
+  const scoreResult = await _decryptWithRetry(cofheClient, scoreCtHash, "match score");
 
-  if (!winnerResult) throw new Error("Threshold decryption timed out.");
   const winnerIndex = Number(winnerResult.decryptedValue);
+  const winnerScore = Number(scoreResult.decryptedValue);
 
-  // Step 5: Reveal match on-chain (assigns activeAdvertiser, no payment)
+  // Compute match quality from on-chain advertiser data
+  const advData = await _contract.getAdvertiser(winnerIndex);
+  let maxPossible = 0;
+  for (let i = 0; i < 5; i++) {
+    maxPossible += Number(advData[0][i]) * 100;
+  }
+  const quality = maxPossible > 0 ? Math.round((winnerScore * 100) / maxPossible) : 0;
+
+  // Step 5: Reveal match on-chain with both decrypted values
   const revealTx = await _contract.revealMatch(
     taskId,
     winnerIndex,
-    winnerResult.signature
+    winnerResult.signature,
+    winnerScore,
+    scoreResult.signature
   );
   await revealTx.wait();
 
-  console.log(`[EAX SDK] Match revealed | Advertiser: ${winnerIndex} | Task: ${taskId}`);
+  console.log(`[EAX SDK] Match revealed | Advertiser: ${winnerIndex} | Score: ${winnerScore} | Quality: ${quality}% | Task: ${taskId}`);
 
   return {
     advertiserId: winnerIndex,
+    score: winnerScore,
+    maxScore: maxPossible,
+    quality,
     taskId: taskId.toString(),
     txHash: tx.hash,
   };
@@ -167,9 +170,10 @@ export async function runMatch() {
 /**
  * Read the user's active advertiser assignment directly from the contract.
  * Returns null if user has no active match.
+ * Now includes match quality data for score-proportional reward estimation.
  * 
  * @param {string} [userAddress] - defaults to connected wallet
- * @returns {{ advertiserId: number } | null}
+ * @returns {{ advertiserId: number, score: number, maxScore: number, quality: number } | null}
  */
 export async function getActiveAdvertiser(userAddress) {
   if (!_contract) throw new Error("Call initEAX() first");
@@ -178,15 +182,20 @@ export async function getActiveAdvertiser(userAddress) {
   const hasMatch = await _contract.hasActiveMatch(addr);
   if (!hasMatch) return null;
 
-  const advId = await _contract.activeAdvertiser(addr);
-  return { advertiserId: Number(advId) };
+  const advId = Number(await _contract.activeAdvertiser(addr));
+  const score = Number(await _contract.matchScore(addr));
+  const maxScore = Number(await _contract.matchMaxScore(addr));
+  const quality = maxScore > 0 ? Math.round((score * 100) / maxScore) : 0;
+
+  return { advertiserId: advId, score, maxScore, quality };
 }
 
 /**
- * Call recordImpression() on-chain — triggers payout to user.
+ * Call recordImpression() on-chain — triggers score-proportional payout to user.
+ * Payout = bid × (matchScore / maxScore).
  * Should be called when the ad is actually displayed.
  * 
- * @returns {{ txHash: string, payout: number, advertiserId: number }}
+ * @returns {{ txHash: string, payoutWei: string, payoutATTN: number, advertiserId: number }}
  */
 export async function recordImpression() {
   if (!_contract) throw new Error("Call initEAX() first");
@@ -195,22 +204,47 @@ export async function recordImpression() {
   const tx = await _contract.recordImpression();
   const receipt = await tx.wait();
 
-  // Parse payout from ImpressionRecorded event
+  // Parse payout from ImpressionRecorded event (now uint256 payoutWei)
   const { ethers } = await import("ethers");
   const iface = new ethers.Interface(EAX_ABI);
-  let payout = 0;
+  let payoutWei = BigInt(0);
   for (const log of receipt.logs) {
     try {
       const parsed = iface.parseLog({ topics: log.topics, data: log.data });
       if (parsed?.name === "ImpressionRecorded") {
-        payout = Number(parsed.args[2]); // uint64 payout
+        payoutWei = parsed.args[2]; // uint256 payoutWei
         break;
       }
     } catch {}
   }
 
-  console.log(`[EAX SDK] Impression recorded | Payout: ${payout} ATTN`);
-  return { txHash: tx.hash, payout, advertiserId: advId };
+  const payoutATTN = Number(ethers.formatEther(payoutWei));
+  console.log(`[EAX SDK] Impression recorded | Payout: ${payoutATTN.toFixed(4)} ATTN (${payoutWei} wei)`);
+  return { txHash: tx.hash, payoutWei: payoutWei.toString(), payoutATTN, advertiserId: advId };
+}
+
+// ── Internal: CoFHE decryption with retry ───────────────────────
+
+async function _decryptWithRetry(cofheClient, ctHash, label) {
+  const MAX_RETRIES = 12;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await cofheClient
+        .decryptForTx(ctHash)
+        .withPermit()
+        .execute();
+      return result;
+    } catch (err) {
+      const is428 = err?.message?.includes("428") || err?.message?.includes("Precondition");
+      if (is428 && attempt < MAX_RETRIES) {
+        console.log(`[EAX SDK] CoFHE still computing ${label} (attempt ${attempt}/${MAX_RETRIES}). Retrying in 5s...`);
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(`Threshold decryption of ${label} timed out after ${MAX_RETRIES} attempts.`);
 }
 
 // ── Internal: extension bridge ──────────────────────────────────

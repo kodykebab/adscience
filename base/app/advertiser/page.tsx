@@ -20,15 +20,15 @@ export default function RegisterAdvertiser() {
   const [adCta, setAdCta] = useState("Learn More");
   const [adLink, setAdLink] = useState("");
 
-  const toggleCategory = (index: number) => {
+  const updateWeight = (index: number, value: number) => {
     const newVector = [...vector];
-    newVector[index] = newVector[index] === 1 ? 0 : 1;
+    newVector[index] = Math.min(100, Math.max(0, value));
     setVector(newVector);
   };
 
   const handleRegister = async () => {
     if (vector.every(v => v === 0)) {
-      setStatus("Error: Select at least one category to target.");
+      setStatus("Error: Set at least one category weight above 0.");
       return;
     }
     if (!adTitle || !adLink) {
@@ -110,6 +110,8 @@ export default function RegisterAdvertiser() {
     }
   };
 
+  const totalWeight = vector.reduce((a, b) => a + b, 0);
+
   return (
     <div className="min-h-screen bg-black text-white font-sans flex flex-col justify-center items-center relative overflow-hidden">
       
@@ -128,36 +130,83 @@ export default function RegisterAdvertiser() {
         </div>
         
         <p className="text-zinc-400 text-lg mb-8 leading-relaxed">
-          Target encrypted intent blindly. Select categories, set your bid, and upload your ad creative. EAX handles the encrypted matching and cross-site delivery.
+          Target encrypted intent with weighted precision. Set category relevance weights (0–100), your bid, and upload your ad creative.
         </p>
 
         <div className="space-y-6">
-            {/* Categories */}
+            {/* Weighted Category Targeting */}
             <div className="bg-zinc-800/40 p-6 rounded-2xl border border-zinc-700/50">
-                <label className="block text-zinc-300 font-medium mb-3 text-sm tracking-wide uppercase">Select Target Interests</label>
-                <div className="flex flex-wrap gap-3">
+                <div className="flex justify-between items-center mb-4">
+                    <label className="text-zinc-300 font-medium text-sm tracking-wide uppercase">Target Interest Weights</label>
+                    <span className="text-xs text-zinc-500 font-mono">Total: {totalWeight}/500</span>
+                </div>
+                <div className="space-y-4">
                     {categories.map((cat, i) => (
-                    <button 
-                        key={cat} 
-                        onClick={() => toggleCategory(i)}
-                        className={`px-5 py-3 rounded-xl text-sm font-bold transition-all duration-200 border ${
-                            vector[i] === 1 
-                                ? 'bg-purple-500/20 text-purple-300 border-purple-500/50 shadow-[0_0_15px_rgba(168,85,247,0.2)]' 
-                                : 'bg-zinc-900/50 text-zinc-500 border-zinc-700 hover:border-zinc-500'
-                        }`}
-                    >
-                        {cat.toUpperCase()} ({vector[i]})
-                    </button>
+                      <div key={cat} className="flex items-center gap-4">
+                        <span className={`w-20 text-sm font-bold uppercase tracking-wide ${vector[i] > 0 ? 'text-purple-300' : 'text-zinc-600'}`}>
+                          {cat}
+                        </span>
+                        <div className="flex-1 relative">
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={vector[i]}
+                            onChange={(e) => updateWeight(i, parseInt(e.target.value))}
+                            className="w-full h-2 rounded-full appearance-none cursor-pointer"
+                            style={{
+                              background: `linear-gradient(to right, #8b5cf6 0%, #ec4899 ${vector[i]}%, #27272a ${vector[i]}%, #27272a 100%)`,
+                            }}
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={vector[i]}
+                            onChange={(e) => updateWeight(i, parseInt(e.target.value) || 0)}
+                            className="w-16 bg-zinc-900 text-white text-center text-sm font-mono p-1.5 rounded-lg border border-zinc-700 focus:outline-none focus:border-purple-500"
+                          />
+                          <span className="text-zinc-600 text-xs">%</span>
+                        </div>
+                      </div>
                     ))}
                 </div>
+                <div className="mt-4 flex gap-2 flex-wrap">
+                  {vector.map((v, i) => (
+                    <div key={i} className="flex items-center gap-1.5">
+                      <div 
+                        className="h-1.5 rounded-full transition-all duration-300" 
+                        style={{ 
+                          width: `${Math.max(4, v * 0.6)}px`,
+                          background: v > 0 ? `linear-gradient(90deg, #8b5cf6, #ec4899)` : '#3f3f46',
+                          opacity: v > 0 ? 0.8 : 0.3,
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+            </div>
+
+            {/* Vector Preview */}
+            <div className="bg-zinc-800/30 px-4 py-3 rounded-xl border border-zinc-700/30 flex items-center gap-3">
+              <span className="text-zinc-500 text-xs font-mono">vec:</span>
+              <div className="flex gap-2">
+                {vector.map((v, i) => (
+                  <span key={i} className={`text-sm font-mono px-2 py-0.5 rounded ${v > 50 ? 'bg-purple-500/20 text-purple-300' : v > 0 ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-900 text-zinc-600'}`}>
+                    {v}
+                  </span>
+                ))}
+              </div>
             </div>
 
             {/* Bid */}
             <div className="bg-zinc-800/40 p-6 rounded-2xl border border-zinc-700/50 flex gap-4 items-center">
                 <div className="flex-1">
-                    <label className="block text-zinc-300 font-medium mb-2 text-sm tracking-wide uppercase">Your Max Bid (ATTN)</label>
+                    <label className="block text-zinc-300 font-medium mb-2 text-sm tracking-wide uppercase">Max Bid (ATTN)</label>
                     <p className="text-xs text-zinc-500 max-w-sm">
-                        This is what you pay when a user views your ad after an encrypted match. Higher bids win more auctions.
+                        Maximum payout for a perfect match. Partial matches pay proportionally: <span className="text-purple-400 font-mono">bid × (matchScore / maxScore)</span>.
                     </p>
                 </div>
                 <div className="flex-shrink-0">
@@ -216,7 +265,7 @@ export default function RegisterAdvertiser() {
                 onClick={handleRegister}
                 className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white text-lg font-bold py-4 rounded-xl shadow-lg hover:shadow-purple-500/25 hover:from-purple-500 hover:to-pink-500 transition-all duration-300 transform hover:-translate-y-0.5 active:translate-y-0 mt-4"
             >
-                Register Intent Target + Ad Creative
+                Register Weighted Target + Ad Creative
             </button>
         </div>
       </div>

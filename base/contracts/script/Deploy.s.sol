@@ -13,7 +13,8 @@ contract DeployScript is Script {
         MockERC20 token = new MockERC20();
         EAX eax = new EAX(address(token));
 
-        eax.initializeAdvertisers();
+        // No initializeAdvertisers() — advertisers register dynamically via the portal.
+        // This also avoids the deployment timeout caused by FHE calls in the constructor.
 
         // Send half of the tokens to the EAX contract so it can pay out users
         token.transfer(address(eax), 500000 * 10**token.decimals());

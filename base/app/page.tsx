@@ -3,18 +3,21 @@ import { useEffect, useState } from "react";
 import { ethers, BrowserProvider } from "ethers";
 import EAXJson from "../contracts/out/EAX.sol/EAX.json";
 
+const CATEGORIES = ["CRYPTO", "AI", "FINANCE", "GAMING", "DEV"];
+
 export default function Home() {
   const [vector, setVector] = useState<number[] | null>(null);
   const [status, setStatus] = useState("Waiting for Chrome Extension...");
   const [txHash, setTxHash] = useState("");
   const [advertiserId, setAdvertiserId] = useState<number | null>(null);
+  const [matchQuality, setMatchQuality] = useState<number | null>(null);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data && event.data.type === "EAX_USER_VECTOR_TO_APP") {
-        console.log("Received vector from extension:", event.data.vector);
+        console.log("Received weighted vector from extension:", event.data.vector);
         setVector(event.data.vector);
-        setStatus("Intent Vector Received. Ready to Encrypt on-chain.");
+        setStatus("Weighted Intent Vector Received. Ready to Encrypt on-chain.");
       }
     };
 
@@ -47,7 +50,7 @@ export default function Home() {
       const { publicClient, walletClient } = await Ethers6Adapter(provider, signer);
       await cofheClient.connect(publicClient, walletClient);
       
-      setStatus("Encrypting vector via CoFHE ZK proof pipeline...");
+      setStatus("Encrypting weighted vector via CoFHE ZK proof pipeline...");
       const { Encryptable } = await import('@cofhe/sdk');
 
       const encryptedInputs = await cofheClient.encryptInputs(
@@ -74,7 +77,7 @@ export default function Home() {
       const tx = await contract.matchIntent(encryptedVector);
       setTxHash(tx.hash);
       
-      setStatus("Transaction submitted. Computing FHE match on Fhenix CoFHE...");
+      setStatus("Transaction submitted. Computing FHE weighted dot-product match on Fhenix CoFHE...");
       const receipt = await tx.wait();
 
       // Parse MatchSubmitted event to get taskId
@@ -95,25 +98,32 @@ export default function Home() {
         return;
       }
 
-      setStatus(`Task #${taskId} created. Reading encrypted handle...`);
+      setStatus(`Task #${taskId} created. Reading encrypted handles...`);
 
-      // Read the encrypted winnerIndex handle
+      // Read both encrypted handles from the task
       const task = await contract.tasks(taskId);
-      const winnerCtHash = task[0]; // bytes32 (euint8 handle)
+      const winnerCtHash = task[0]; // euint8 handle (winnerIndex)
+      const scoreCtHash  = task[1]; // euint64 handle (winnerScore)
 
-      // Phase 2: Threshold decryption
-      // The CoFHE coprocessor computes FHE operations asynchronously after the tx confirms.
-      // We must wait for the result handle to be ready before requesting decryption.
+      // Phase 2: Threshold decryption of BOTH winner index and score
       setStatus("Waiting for CoFHE coprocessor to finish FHE computation...");
       await cofheClient.permits.getOrCreateSelfPermit();
 
       let winnerResult: any;
+      let scoreResult: any;
       const MAX_RETRIES = 12;
+
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-          setStatus(`Requesting threshold decryption (attempt ${attempt}/${MAX_RETRIES})...`);
-          winnerResult = await cofheClient.decryptForTx(winnerCtHash).withPermit().execute();
-          break; // Success
+          if (!winnerResult) {
+            setStatus(`Decrypting winner index (attempt ${attempt}/${MAX_RETRIES})...`);
+            winnerResult = await cofheClient.decryptForTx(winnerCtHash).withPermit().execute();
+          }
+          if (!scoreResult) {
+            setStatus(`Decrypting match score (attempt ${attempt}/${MAX_RETRIES})...`);
+            scoreResult = await cofheClient.decryptForTx(scoreCtHash).withPermit().execute();
+          }
+          break; // Both succeeded
         } catch (err: any) {
           const is428 = err?.message?.includes("428") || err?.message?.includes("Precondition");
           if (is428 && attempt < MAX_RETRIES) {
@@ -125,16 +135,33 @@ export default function Home() {
         }
       }
 
-      if (!winnerResult) throw new Error("Threshold decryption timed out after all retries.");
+      if (!winnerResult || !scoreResult) throw new Error("Threshold decryption timed out after all retries.");
       const winnerIndex = Number(winnerResult.decryptedValue);
+      const winnerScore = Number(scoreResult.decryptedValue);
 
-      // Phase 3: Reveal match on-chain (assigns activeAdvertiser, NO payment)
-      setStatus(`Decrypted! Winner: Advertiser #${winnerIndex}. Revealing on-chain...`);
-      const revealTx = await contract.revealMatch(taskId, winnerIndex, winnerResult.signature);
+      // Compute match quality from on-chain advertiser data
+      const advData = await contract.getAdvertiser(winnerIndex);
+      const advVector = advData[0]; // uint64[5]
+      let maxPossible = 0;
+      for (let i = 0; i < 5; i++) {
+        maxPossible += Number(advVector[i]) * 100;
+      }
+      const quality = maxPossible > 0 ? Math.round((winnerScore * 100) / maxPossible) : 0;
+      setMatchQuality(quality);
+
+      // Phase 3: Reveal match on-chain with BOTH decrypted values
+      setStatus(`Decrypted! Winner: Advertiser #${winnerIndex} | Score: ${winnerScore} (${quality}% match). Revealing on-chain...`);
+      const revealTx = await contract.revealMatch(
+        taskId,
+        winnerIndex,
+        winnerResult.signature,
+        winnerScore,
+        scoreResult.signature
+      );
       await revealTx.wait();
 
       setAdvertiserId(winnerIndex);
-      setStatus(`Ad assigned! Advertiser #${winnerIndex} will be served on any site with EAX SDK. Visit /demo to see your ad and earn ATTN.`);
+      setStatus(`Ad assigned! Advertiser #${winnerIndex} | ${quality}% match quality. Visit /demo to see your ad and earn ATTN.`);
 
     } catch (e: any) {
         setStatus("Encryption/Transaction Error: " + (e.reason || e.message));
@@ -153,13 +180,13 @@ export default function Home() {
           Encrypted Attention Exchange
         </h1>
         <p className="text-zinc-400 text-lg mb-10 leading-relaxed text-balance">
-          Monetize your browsing history without revealing it. Your intent is encrypted locally, processed blindly by advertisers, and you get paid when ads are served.
+          Monetize your browsing history without revealing it. Your interest weights are encrypted locally, matched blindly against advertiser targets, and you get paid proportionally to match quality.
         </p>
 
         <div className="bg-zinc-800/50 p-6 rounded-2xl mb-8 border border-zinc-700/50 flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <span className="text-zinc-300 font-medium">Status</span>
-            <span className="bg-zinc-900 px-3 py-1 rounded-full text-sm text-emerald-400 font-mono tracking-wide border border-emerald-900/50 flex items-center gap-2">
+            <span className="bg-zinc-900 px-3 py-1 rounded-full text-sm text-emerald-400 font-mono tracking-wide border border-emerald-900/50 flex items-center gap-2 max-w-md text-right">
               {status.includes("Waiting") ? <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> : null}
               {status}
             </span>
@@ -167,11 +194,23 @@ export default function Home() {
 
           {vector && (
             <div className="flex flex-col text-left mt-4 border-t border-zinc-700/50 pt-4">
-              <span className="text-zinc-400 text-sm mb-2">Locally Evaluated Vector</span>
-              <div className="flex gap-2 justify-center">
+              <span className="text-zinc-400 text-sm mb-3">Locally Evaluated Weighted Vector</span>
+              <div className="space-y-2">
                 {vector.map((v, i) => (
-                  <div key={i} className={`flex items-center justify-center w-12 h-12 rounded-xl text-xl font-bold ${v === 1 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-zinc-800 text-zinc-500 border border-zinc-700'}`}>
-                    {v}
+                  <div key={i} className="flex items-center gap-3">
+                    <span className="text-xs font-mono text-zinc-500 w-16 uppercase">{CATEGORIES[i]}</span>
+                    <div className="flex-1 h-3 bg-zinc-800 rounded-full overflow-hidden relative">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{
+                          width: `${v}%`,
+                          background: v > 60 ? 'linear-gradient(90deg, #10b981, #06b6d4)' : v > 30 ? 'linear-gradient(90deg, #3b82f6, #6366f1)' : v > 0 ? '#6b7280' : 'transparent',
+                        }}
+                      />
+                    </div>
+                    <span className={`text-sm font-mono w-10 text-right ${v > 60 ? 'text-emerald-400' : v > 30 ? 'text-blue-400' : v > 0 ? 'text-zinc-500' : 'text-zinc-700'}`}>
+                      {v}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -188,6 +227,22 @@ export default function Home() {
             <div className="mt-6 flex flex-col items-center p-6 bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 border border-emerald-500/30 rounded-2xl">
               <span className="text-emerald-400 text-lg font-bold mb-1">Ad Assigned!</span>
               <span className="text-3xl font-extrabold text-white">Advertiser #{advertiserId}</span>
+              {matchQuality !== null && (
+                <div className="mt-3 flex items-center gap-3">
+                  <div className="w-32 h-2 bg-zinc-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-700"
+                      style={{
+                        width: `${matchQuality}%`,
+                        background: matchQuality > 70 ? '#10b981' : matchQuality > 40 ? '#3b82f6' : '#ef4444',
+                      }}
+                    />
+                  </div>
+                  <span className={`text-sm font-bold ${matchQuality > 70 ? 'text-emerald-400' : matchQuality > 40 ? 'text-blue-400' : 'text-red-400'}`}>
+                    {matchQuality}% match
+                  </span>
+                </div>
+              )}
               <a href="/demo" className="mt-4 text-sm text-cyan-400 hover:text-cyan-300 underline underline-offset-4 transition-colors">
                 View your ad & earn ATTN →
               </a>

@@ -11,20 +11,26 @@ import { pipeline, env } from './transformers/transformers.min.js';
 //  FHE & On-Chain: Wired to Ethereum Sepolia via CoFHE SDK
 // ============================================================
 
-// Setup environment for MV3 local ML
+// ── Transformers.js Environment Config (critical for cross-device consistency) ──
+
+// Don't look for local models — always fetch from HuggingFace Hub
 env.allowLocalModels = false;
-env.useBrowserCache = false; // Fix: use Chrome's native disk HTTP cache instead of buggy Cache API
+
+// Disable Cache API — Chrome MV3 service workers have broken Cache API behavior.
+// Browser's native HTTP cache handles caching instead.
+env.useBrowserCache = false;
+
+// Point ONNX WASM runtime to our bundled files
 env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('scripts/transformers/');
 
-// Standard 5 Categories (Reverted for FHE efficiency)
-const CATEGORIES = ["crypto", "ai", "finance", "gaming", "dev"];
+// Force SIMD-only WASM (no multi-threading).
+// Chrome extension popups do NOT have SharedArrayBuffer (required for WASM threads).
+// Without this, Transformers.js tries ort-wasm-simd-threaded.wasm, which silently fails
+// on some devices and falls back to non-SIMD, producing different float results.
+env.backends.onnx.wasm.numThreads = 1;
 
-// Hardcoded advertisers (mock matching 5-item vectors)
-const ADVERTISERS = [
-  { vector: [1, 0, 1, 0, 0], bid: 10, name: "Advertiser #1 (Tech/Finance)" },
-  { vector: [0, 1, 1, 0, 1], bid: 15, name: "Advertiser #2 (Gaming/Entertainment)" },
-  { vector: [1, 1, 0, 1, 0], bid: 12, name: "Advertiser #3 (Broad Match)" },
-];
+// Standard 5 Categories
+const CATEGORIES = ["crypto", "ai", "finance", "gaming", "dev"];
 
 // ---- State Machine ----
 const STATES = [
@@ -162,35 +168,69 @@ function showDomains(domains) {
 // ============================================================
 let classifierPipeline = null;
 
-// Map well-known domains to categories directly to help the model
+// Map well-known domains to categories directly — avoids ML misclassification
 const DOMAIN_HINTS = {
-  "claude.ai": "ai",
-  "openai.com": "ai",
-  "chat.openai.com": "ai",
-  "bard.google.com": "ai",
-  "huggingface.co": "ai",
-  "connect.phantom.app": "crypto",
-  "phantom.app": "crypto",
-  "metamask.io": "crypto",
-  "etherscan.io": "crypto",
-  "coinbase.com": "crypto",
-  "binance.com": "crypto",
-  "uniswap.org": "crypto",
-  "opensea.io": "crypto",
-  "github.com": "dev",
-  "stackoverflow.com": "dev",
-  "npmjs.com": "dev",
-  "localhost": "dev",
-  "vercel.app": "dev",
-  "netlify.app": "dev",
-  "bloomberg.com": "finance",
-  "yahoo.com/finance": "finance",
-  "robinhood.com": "finance",
-  "twitch.tv": "gaming",
-  "steampowered.com": "gaming",
-  "store.steampowered.com": "gaming",
-  "epicgames.com": "gaming",
-  "discord.com": "gaming",
+  // AI
+  "claude.ai": "ai", "openai.com": "ai", "chat.openai.com": "ai",
+  "bard.google.com": "ai", "gemini.google.com": "ai",
+  "huggingface.co": "ai", "replicate.com": "ai",
+  "anthropic.com": "ai", "midjourney.com": "ai",
+  "stability.ai": "ai", "perplexity.ai": "ai",
+  "poe.com": "ai", "character.ai": "ai",
+  "developer.nvidia.com": "ai", "nvidia.com": "ai",
+  "kaggle.com": "ai", "colab.research.google.com": "ai",
+  "wandb.ai": "ai", "lightning.ai": "ai",
+
+  // Crypto
+  "connect.phantom.app": "crypto", "phantom.app": "crypto",
+  "metamask.io": "crypto", "etherscan.io": "crypto",
+  "coinbase.com": "crypto", "binance.com": "crypto",
+  "uniswap.org": "crypto", "opensea.io": "crypto",
+  "polymarket.com": "crypto", "dexscreener.com": "crypto",
+  "coingecko.com": "crypto", "coinmarketcap.com": "crypto",
+  "solscan.io": "crypto", "arbiscan.io": "crypto",
+  "polygonscan.com": "crypto", "basescan.org": "crypto",
+  "raydium.io": "crypto", "jupiter.ag": "crypto",
+  "aave.com": "crypto", "lido.fi": "crypto",
+  "defillama.com": "crypto", "dune.com": "crypto",
+  "zapper.xyz": "crypto", "zerion.io": "crypto",
+  "magic.link": "crypto", "alchemy.com": "crypto",
+  "infura.io": "crypto", "thirdweb.com": "crypto",
+  "fhenix.io": "crypto", "fhenix.zone": "crypto",
+
+  // Dev
+  "github.com": "dev", "stackoverflow.com": "dev",
+  "npmjs.com": "dev", "localhost": "dev",
+  "vercel.app": "dev", "netlify.app": "dev",
+  "gitlab.com": "dev", "bitbucket.org": "dev",
+  "codepen.io": "dev", "codesandbox.io": "dev",
+  "replit.com": "dev", "docs.rs": "dev",
+  "crates.io": "dev", "pypi.org": "dev",
+  "developer.mozilla.org": "dev", "w3schools.com": "dev",
+  "digitalocean.com": "dev", "aws.amazon.com": "dev",
+  "console.cloud.google.com": "dev", "portal.azure.com": "dev",
+  "render.com": "dev", "railway.app": "dev",
+  "supabase.com": "dev", "firebase.google.com": "dev",
+
+  // Finance
+  "bloomberg.com": "finance", "robinhood.com": "finance",
+  "tradingview.com": "finance", "investing.com": "finance",
+  "finance.yahoo.com": "finance", "marketwatch.com": "finance",
+  "seekingalpha.com": "finance", "investopedia.com": "finance",
+  "schwab.com": "finance", "fidelity.com": "finance",
+  "etrade.com": "finance", "bankofamerica.com": "finance",
+  "chase.com": "finance", "mint.com": "finance",
+  "nerdwallet.com": "finance", "cnbc.com": "finance",
+
+  // Gaming
+  "twitch.tv": "gaming", "steampowered.com": "gaming",
+  "store.steampowered.com": "gaming", "epicgames.com": "gaming",
+  "discord.com": "gaming", "itch.io": "gaming",
+  "roblox.com": "gaming", "ea.com": "gaming",
+  "playstation.com": "gaming", "xbox.com": "gaming",
+  "nintendo.com": "gaming", "ign.com": "gaming",
+  "gamespot.com": "gaming", "pcgamer.com": "gaming",
+  "howlongtobeat.com": "gaming", "speedrun.com": "gaming",
 };
 
 // Domains that are too generic to classify — skip them
@@ -209,13 +249,38 @@ async function startClassification() {
   goToState("state-classifying");
 
   try {
-    // 1. Initialize local webassembly transformer model (downloads/caches on first run)
+    // 1. Initialize local WebAssembly transformer model
     if (!classifierPipeline) {
       document.querySelector("#state-classifying h2").textContent = "Loading AI Model...";
-      document.querySelector("#state-classifying .panel-desc").textContent = "Downloading & caching model (~90MB). Next runs will be instant.";
+      document.querySelector("#state-classifying .panel-desc").textContent = "Downloading & caching model (~25MB). Next runs will be instant.";
 
-      // Using a fast distilled zero-shot classification model
-      classifierPipeline = await pipeline('zero-shot-classification', 'Xenova/mobilebert-uncased-mnli');
+      // Using MobileBERT for zero-shot classification.
+      // Lock to quantized model + specific revision to guarantee identical weights on every device.
+      // Without pinning, HuggingFace may serve updated weights → different scores.
+      const MODEL_ID = 'Xenova/mobilebert-uncased-mnli';
+
+      let retries = 0;
+      const MAX_RETRIES = 2;
+      while (!classifierPipeline && retries <= MAX_RETRIES) {
+        try {
+          classifierPipeline = await pipeline('zero-shot-classification', MODEL_ID, {
+            quantized: true,       // Use INT8 quantized model — smaller, faster, deterministic
+            progress_callback: (progress) => {
+              if (progress.status === 'progress' && progress.progress) {
+                document.querySelector("#state-classifying .panel-desc").textContent =
+                  `Downloading model: ${Math.round(progress.progress)}%`;
+              }
+            }
+          });
+        } catch (initErr) {
+          retries++;
+          console.warn(`[ML] Model init attempt ${retries} failed:`, initErr);
+          if (retries > MAX_RETRIES) throw initErr;
+          document.querySelector("#state-classifying .panel-desc").textContent =
+            `Model load failed, retrying (${retries}/${MAX_RETRIES})...`;
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
     }
 
     document.querySelector("#state-classifying h2").textContent = "Running Inference...";
@@ -245,6 +310,15 @@ async function startClassification() {
         continue;
       }
 
+      // Check if any hint key is a substring of this domain (catches subdomains)
+      const partialHint = Object.keys(DOMAIN_HINTS).find(key => domain.includes(key) || key.includes(domain));
+      if (partialHint) {
+        categoryScores[DOMAIN_HINTS[partialHint]] += 0.8; // slightly lower weight for partial match
+        classifiedCount++;
+        console.log(`[Partial Hint] ${domain} → ${DOMAIN_HINTS[partialHint]} (via ${partialHint})`);
+        continue;
+      }
+
       // Build a natural language sentence for the NLI model (much better than raw domain)
       const sentence = `The user frequently visits the website ${domain}`;
 
@@ -252,12 +326,11 @@ async function startClassification() {
         const result = await classifierPipeline(sentence, CATEGORIES, { multi_label: true });
         console.log(`[ML] ${domain}:`, result.labels[0], result.scores[0].toFixed(3));
 
-        // Only count the top label if its score is confident enough (> 0.35)
-        result.labels.forEach((label, idx) => {
-          if (result.scores[idx] > 0.35) {
-            categoryScores[label] += result.scores[idx];
-          }
-        });
+        // Only count the TOP label, and only if confident enough (> 0.55)
+        // This prevents a single domain from polluting multiple categories
+        if (result.scores[0] > 0.55) {
+          categoryScores[result.labels[0]] += result.scores[0];
+        }
         classifiedCount++;
       } catch (e) {
         console.warn(`Skipping domain ${domain}:`, e);
@@ -270,14 +343,13 @@ async function startClassification() {
 
     console.log("Aggregated Category Scores:", categoryScores);
 
-    // 4. Normalize scores and apply threshold
-    //    A category is "active" if its average score across all domains is meaningful
-    const threshold = 0.4; // Higher threshold to avoid false positives
-    const maxScore = Math.max(...Object.values(categoryScores), 1); // avoid div by 0
+    // 4. Normalize scores to weighted 0–100 range
+    //    Each category gets a weight proportional to its relevance
+    const maxScore = Math.max(...Object.values(categoryScores), 0.01); // avoid div by 0
 
     userVector = CATEGORIES.map((cat) => {
       const normalizedScore = categoryScores[cat] / maxScore;
-      return normalizedScore >= threshold ? 1 : 0;
+      return Math.min(100, Math.max(0, Math.round(normalizedScore * 100)));
     });
 
   } catch (err) {
@@ -294,13 +366,17 @@ function showInterests(vector) {
 
   CATEGORIES.forEach((cat, i) => {
     const tag = document.createElement("span");
-    tag.className = `tag ${vector[i] ? "active" : "inactive"}`;
-    tag.textContent = cat;
+    tag.className = `tag ${vector[i] > 0 ? "active" : "inactive"}`;
+    tag.innerHTML = `${cat} <strong>${vector[i]}%</strong>`;
+    if (vector[i] > 0) {
+      tag.style.opacity = `${0.4 + (vector[i] / 100) * 0.6}`;
+    }
     container.appendChild(tag);
   });
 
-  document.getElementById("vector-code").textContent = `[${vector.join(", ")}]`;
-  decryptText(document.getElementById("vector-code"), `[${vector.join(", ")}]`, 50);
+  const vecStr = `[${vector.join(", ")}]`;
+  document.getElementById("vector-code").textContent = vecStr;
+  decryptText(document.getElementById("vector-code"), vecStr, 50);
   goToState("state-interests");
 }
 
