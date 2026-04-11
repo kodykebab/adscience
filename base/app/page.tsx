@@ -77,15 +77,63 @@ export default function Home() {
       const tx = await contract.matchIntent(encryptedVector);
       setTxHash(tx.hash);
       
-      setStatus("Transaction submitted. Computing match on Fhenix CoFHE Testnet...");
-      await tx.wait();
-      setStatus("Match processed! Awaiting decentralised Decryption Threshold to claim ATTN payout...");
+      setStatus("Transaction submitted. Computing FHE match on Fhenix CoFHE...");
+      const receipt = await tx.wait();
 
-      // Normally we would listen for the event. Here we simulate the wait for the async payout reveal threshold
-      setTimeout(() => {
-         setStatus("Match Decrypted! Payout executed successfully.");
-         setPayout(Math.floor(Math.random() * 20) + 10); // Display simulated winning bid (The app can fetch real amount securely after contract emits it)
-      }, 5000);
+      // Parse MatchSubmitted event to get taskId
+      const iface = new ethers.Interface(EAXJson.abi);
+      let taskId: bigint | undefined;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
+          if (parsed?.name === 'MatchSubmitted') {
+            taskId = parsed.args[0];
+            break;
+          }
+        } catch { /* skip non-EAX logs */ }
+      }
+
+      if (taskId === undefined) {
+        setStatus("Error: Could not parse MatchSubmitted event from receipt.");
+        return;
+      }
+
+      setStatus(`Task #${taskId} created. Reading encrypted handles...`);
+
+      // Read the encrypted ctHash handles from the task struct
+      const task = await contract.tasks(taskId);
+      const winnerCtHash = task[0]; // bytes32 (euint8 handle)
+      const payoutCtHash = task[1]; // bytes32 (euint64 handle)
+
+      setStatus("Requesting threshold decryption from CoFHE network...");
+
+      // Threshold network requires a signed permit even for publicly-allowed handles (HTTP 428 without one).
+      // getOrCreateSelfPermit will reuse an existing permit or prompt a wallet signature to create one.
+      await cofheClient.permits.getOrCreateSelfPermit();
+
+      // Decrypt both handles via threshold network — returns { ctHash, decryptedValue, signature }
+      const [winnerResult, payoutResult] = await Promise.all([
+        cofheClient.decryptForTx(winnerCtHash).withPermit().execute(),
+        cofheClient.decryptForTx(payoutCtHash).withPermit().execute(),
+      ]);
+
+      const winnerIndex = Number(winnerResult.decryptedValue);
+      const payoutAmount = Number(payoutResult.decryptedValue);
+
+      setStatus(`Decrypted! Winner: Advertiser #${winnerIndex}, Payout: ${payoutAmount} ATTN. Claiming...`);
+
+      // Call revealAndClaim with the real decrypted values and threshold signatures
+      const claimTx = await contract.revealAndClaim(
+        taskId,
+        winnerIndex,
+        winnerResult.signature,
+        payoutAmount,
+        payoutResult.signature
+      );
+      await claimTx.wait();
+
+      setStatus("Payout claimed successfully!");
+      setPayout(payoutAmount);
 
     } catch (e: any) {
         setStatus("Encryption/Transaction Error: " + (e.reason || e.message));
