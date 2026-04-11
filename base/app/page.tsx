@@ -37,12 +37,12 @@ export default function Home() {
       await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
       
-      setStatus("Connecting to Base Sepolia CoFHE Network...");
+      setStatus("Connecting to Ethereum Sepolia CoFHE Network...");
       const { createCofheConfig, createCofheClient } = await import('@cofhe/sdk/web');
       const { chains } = await import('@cofhe/sdk/chains');
       const { Ethers6Adapter } = await import('@cofhe/sdk/adapters');
 
-      const config = createCofheConfig({ supportedChains: [chains.baseSepolia] });
+      const config = createCofheConfig({ supportedChains: [chains.sepolia] });
       const cofheClient = createCofheClient(config);
 
       const { publicClient, walletClient } = await Ethers6Adapter(provider, signer);

@@ -1,19 +1,16 @@
 import { http, createConfig, createStorage, cookieStorage } from 'wagmi'
-import { baseSepolia } from 'wagmi/chains'
-import { baseAccount, injected } from 'wagmi/connectors'
+import { sepolia } from 'wagmi/chains'
+import { injected } from 'wagmi/connectors'
 
 export const config = createConfig({
-  chains: [baseSepolia],
+  chains: [sepolia],
   connectors: [
     injected(),
-    baseAccount({
-      appName: 'Base',
-    }),
   ],
   storage: createStorage({ storage: cookieStorage }),
   ssr: true,
   transports: {
-    [baseSepolia.id]: http('https://sepolia.base.org'),
+    [sepolia.id]: http('https://ethereum-sepolia-rpc.publicnode.com'),
   },
 })
 

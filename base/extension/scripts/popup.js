@@ -8,7 +8,7 @@ import { pipeline, env } from './transformers/transformers.min.js';
 //
 //  History Extraction: REAL (chrome.history API)
 //  Classification: REAL (Local WebAssembly ML via Transformers.js)
-//  FHE & On-Chain: Mocked (to be wired to Base Sepolia)
+//  FHE & On-Chain: Wired to Ethereum Sepolia via CoFHE SDK
 // ============================================================
 
 // Setup environment for MV3 local ML
