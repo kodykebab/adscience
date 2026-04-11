@@ -2,11 +2,9 @@
 import { useState } from "react";
 import Link from "next/link";
 import { ethers, BrowserProvider } from "ethers";
+import EAXJson from "../../contracts/out/EAX.sol/EAX.json";
 
-// Minimal ABI required for EAX Advertiser capabilities
-const EAX_ABI = [
-  "function registerAdvertiser(uint64[5] calldata _vector, uint64 _bid) external"
-];
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
 
 export default function RegisterAdvertiser() {
   const [bid, setBid] = useState<number>(10);
@@ -14,6 +12,13 @@ export default function RegisterAdvertiser() {
   const categories = ["crypto", "ai", "finance", "gaming", "dev"];
   const [txHash, setTxHash] = useState("");
   const [status, setStatus] = useState("Awaiting Configuration");
+  const [assignedId, setAssignedId] = useState<number | null>(null);
+
+  // Ad creative fields
+  const [adTitle, setAdTitle] = useState("");
+  const [adImage, setAdImage] = useState("");
+  const [adCta, setAdCta] = useState("Learn More");
+  const [adLink, setAdLink] = useState("");
 
   const toggleCategory = (index: number) => {
     const newVector = [...vector];
@@ -26,6 +31,10 @@ export default function RegisterAdvertiser() {
       setStatus("Error: Select at least one category to target.");
       return;
     }
+    if (!adTitle || !adLink) {
+      setStatus("Error: Ad title and link are required.");
+      return;
+    }
     
     setStatus("Initiating Smart Contract Registration...");
     
@@ -36,7 +45,7 @@ export default function RegisterAdvertiser() {
       }
       
       const provider = new BrowserProvider(window.ethereum);
-      await provider.send("eth_requestAccounts", []); // Prompts metamask connection
+      await provider.send("eth_requestAccounts", []);
       const signer = await provider.getSigner();
 
       const contractAddress = process.env.NEXT_PUBLIC_EAX_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000";
@@ -45,16 +54,56 @@ export default function RegisterAdvertiser() {
           return;
       }
 
-      const contract = new ethers.Contract(contractAddress, EAX_ABI, signer);
+      const contract = new ethers.Contract(contractAddress, EAXJson.abi, signer);
       
       setStatus("Confirm transaction in your wallet...");
       const tx = await contract.registerAdvertiser(vector, bid);
       setTxHash(tx.hash);
       
       setStatus("Waiting for block confirmation...");
-      await tx.wait();
+      const receipt = await tx.wait();
 
-      setStatus("Advertiser successfully registered! ID: " + tx.hash);
+      // Parse AdvertiserRegistered event to get the assigned ID
+      const iface = new ethers.Interface(EAXJson.abi);
+      let advertiserId: number | undefined;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
+          if (parsed?.name === 'AdvertiserRegistered') {
+            advertiserId = Number(parsed.args[0]);
+            break;
+          }
+        } catch {}
+      }
+
+      if (advertiserId === undefined) {
+        setStatus("On-chain registration confirmed but could not parse advertiser ID.");
+        return;
+      }
+
+      setAssignedId(advertiserId);
+      setStatus(`On-chain registration confirmed! Advertiser ID: ${advertiserId}. Uploading ad creative...`);
+
+      // POST ad creative to backend
+      const res = await fetch(`${BACKEND_URL}/registerAd`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          advertiserId,
+          title: adTitle,
+          image: adImage,
+          cta: adCta,
+          link: adLink,
+        }),
+      });
+
+      if (!res.ok) {
+        setStatus(`On-chain OK (ID: ${advertiserId}) but ad creative upload failed. Is the backend running on ${BACKEND_URL}?`);
+        return;
+      }
+
+      setStatus(`Advertiser #${advertiserId} fully registered! Targeting + ad creative live.`);
+
     } catch (e: any) {
         setStatus("Registration Error: " + (e.reason || e.message));
         console.error(e);
@@ -79,7 +128,7 @@ export default function RegisterAdvertiser() {
         </div>
         
         <p className="text-zinc-400 text-lg mb-8 leading-relaxed">
-          Target encrypted intent blindly. Select the categories your ads apply to, and set your max bid. EAX handles the matching securely over CoFHE.
+          Target encrypted intent blindly. Select categories, set your bid, and upload your ad creative. EAX handles the encrypted matching and cross-site delivery.
         </p>
 
         <div className="space-y-6">
@@ -103,15 +152,15 @@ export default function RegisterAdvertiser() {
                 </div>
             </div>
 
-            {/* Bid Map */}
+            {/* Bid */}
             <div className="bg-zinc-800/40 p-6 rounded-2xl border border-zinc-700/50 flex gap-4 items-center">
                 <div className="flex-1">
                     <label className="block text-zinc-300 font-medium mb-2 text-sm tracking-wide uppercase">Your Max Bid (ATTN)</label>
-                    <p className="text-xs text-zinc-500 max-w-sm mb-3">
-                        This is what you pay when an encrypted user matches your targeting fully. Higher bids prioritize your brand.
+                    <p className="text-xs text-zinc-500 max-w-sm">
+                        This is what you pay when a user views your ad after an encrypted match. Higher bids win more auctions.
                     </p>
                 </div>
-                <div className="flex-shrink-0 flex items-center gap-2">
+                <div className="flex-shrink-0">
                     <input 
                         type="number" 
                         min="1" 
@@ -122,9 +171,44 @@ export default function RegisterAdvertiser() {
                 </div>
             </div>
 
+            {/* Ad Creative */}
+            <div className="bg-zinc-800/40 p-6 rounded-2xl border border-zinc-700/50 space-y-4">
+                <label className="block text-zinc-300 font-medium mb-1 text-sm tracking-wide uppercase">Ad Creative</label>
+                <input
+                  type="text"
+                  placeholder="Ad Title (e.g. Buy Crypto Today)"
+                  value={adTitle}
+                  onChange={(e) => setAdTitle(e.target.value)}
+                  className="w-full bg-zinc-900 text-white p-3 rounded-xl border border-zinc-700 focus:outline-none focus:border-purple-500 transition-colors text-sm"
+                />
+                <input
+                  type="url"
+                  placeholder="Image URL (optional)"
+                  value={adImage}
+                  onChange={(e) => setAdImage(e.target.value)}
+                  className="w-full bg-zinc-900 text-white p-3 rounded-xl border border-zinc-700 focus:outline-none focus:border-purple-500 transition-colors text-sm"
+                />
+                <div className="flex gap-3">
+                  <input
+                    type="text"
+                    placeholder="CTA Button Text"
+                    value={adCta}
+                    onChange={(e) => setAdCta(e.target.value)}
+                    className="flex-1 bg-zinc-900 text-white p-3 rounded-xl border border-zinc-700 focus:outline-none focus:border-purple-500 transition-colors text-sm"
+                  />
+                  <input
+                    type="url"
+                    placeholder="Landing Page URL"
+                    value={adLink}
+                    onChange={(e) => setAdLink(e.target.value)}
+                    className="flex-1 bg-zinc-900 text-white p-3 rounded-xl border border-zinc-700 focus:outline-none focus:border-purple-500 transition-colors text-sm"
+                  />
+                </div>
+            </div>
+
             <div className="flex items-center justify-between px-2">
                 <span className="text-zinc-400 text-sm">{status}</span>
-                {txHash && <span className="bg-purple-900/40 px-3 py-1 rounded-full text-purple-400 text-xs font-mono border border-purple-800/50">{txHash}</span>}
+                {assignedId !== null && <span className="bg-purple-900/40 px-3 py-1 rounded-full text-purple-400 text-xs font-mono border border-purple-800/50">ID: {assignedId}</span>}
             </div>
 
             {/* Action */}
@@ -132,7 +216,7 @@ export default function RegisterAdvertiser() {
                 onClick={handleRegister}
                 className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white text-lg font-bold py-4 rounded-xl shadow-lg hover:shadow-purple-500/25 hover:from-purple-500 hover:to-pink-500 transition-all duration-300 transform hover:-translate-y-0.5 active:translate-y-0 mt-4"
             >
-                Register Intent Target
+                Register Intent Target + Ad Creative
             </button>
         </div>
       </div>

@@ -7,10 +7,9 @@ export default function Home() {
   const [vector, setVector] = useState<number[] | null>(null);
   const [status, setStatus] = useState("Waiting for Chrome Extension...");
   const [txHash, setTxHash] = useState("");
-  const [payout, setPayout] = useState<number | null>(null);
+  const [advertiserId, setAdvertiserId] = useState<number | null>(null);
 
   useEffect(() => {
-    // Listen for messages from the Chrome Extension content script
     const handleMessage = (event: MessageEvent) => {
       if (event.data && event.data.type === "EAX_USER_VECTOR_TO_APP") {
         console.log("Received vector from extension:", event.data.vector);
@@ -51,13 +50,10 @@ export default function Home() {
       setStatus("Encrypting vector via CoFHE ZK proof pipeline...");
       const { Encryptable } = await import('@cofhe/sdk');
 
-      // encryptInputs() returns an EncryptInputsBuilder — must call .execute() to run the full ZK prove + verify pipeline.
-      // execute() returns EncryptedUint64Input[]: [{ctHash: bigint, securityZone: number, utype: number, signature: string}]
       const encryptedInputs = await cofheClient.encryptInputs(
         vector.map(val => Encryptable.uint64(BigInt(val)))
       ).execute();
 
-      // Map into positional tuple arrays for ethers.js ABI encoding of InEuint64[] (tuple[])
       const encryptedVector = encryptedInputs.map((enc: any) => [
         enc.ctHash,
         enc.securityZone,
@@ -73,6 +69,7 @@ export default function Home() {
 
       const contract = new ethers.Contract(contractAddress, EAXJson.abi, signer);
       
+      // Phase 1: Submit encrypted match
       setStatus("Confirm encryption match transaction in your wallet.");
       const tx = await contract.matchIntent(encryptedVector);
       setTxHash(tx.hash);
@@ -98,42 +95,46 @@ export default function Home() {
         return;
       }
 
-      setStatus(`Task #${taskId} created. Reading encrypted handles...`);
+      setStatus(`Task #${taskId} created. Reading encrypted handle...`);
 
-      // Read the encrypted ctHash handles from the task struct
+      // Read the encrypted winnerIndex handle
       const task = await contract.tasks(taskId);
       const winnerCtHash = task[0]; // bytes32 (euint8 handle)
-      const payoutCtHash = task[1]; // bytes32 (euint64 handle)
 
-      setStatus("Requesting threshold decryption from CoFHE network...");
-
-      // Threshold network requires a signed permit even for publicly-allowed handles (HTTP 428 without one).
-      // getOrCreateSelfPermit will reuse an existing permit or prompt a wallet signature to create one.
+      // Phase 2: Threshold decryption
+      // The CoFHE coprocessor computes FHE operations asynchronously after the tx confirms.
+      // We must wait for the result handle to be ready before requesting decryption.
+      setStatus("Waiting for CoFHE coprocessor to finish FHE computation...");
       await cofheClient.permits.getOrCreateSelfPermit();
 
-      // Decrypt both handles via threshold network — returns { ctHash, decryptedValue, signature }
-      const [winnerResult, payoutResult] = await Promise.all([
-        cofheClient.decryptForTx(winnerCtHash).withPermit().execute(),
-        cofheClient.decryptForTx(payoutCtHash).withPermit().execute(),
-      ]);
+      let winnerResult: any;
+      const MAX_RETRIES = 12;
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          setStatus(`Requesting threshold decryption (attempt ${attempt}/${MAX_RETRIES})...`);
+          winnerResult = await cofheClient.decryptForTx(winnerCtHash).withPermit().execute();
+          break; // Success
+        } catch (err: any) {
+          const is428 = err?.message?.includes("428") || err?.message?.includes("Precondition");
+          if (is428 && attempt < MAX_RETRIES) {
+            setStatus(`CoFHE still computing (attempt ${attempt}/${MAX_RETRIES}). Retrying in 5s...`);
+            await new Promise(r => setTimeout(r, 5000));
+            continue;
+          }
+          throw err; // Non-428 error or final attempt
+        }
+      }
 
+      if (!winnerResult) throw new Error("Threshold decryption timed out after all retries.");
       const winnerIndex = Number(winnerResult.decryptedValue);
-      const payoutAmount = Number(payoutResult.decryptedValue);
 
-      setStatus(`Decrypted! Winner: Advertiser #${winnerIndex}, Payout: ${payoutAmount} ATTN. Claiming...`);
+      // Phase 3: Reveal match on-chain (assigns activeAdvertiser, NO payment)
+      setStatus(`Decrypted! Winner: Advertiser #${winnerIndex}. Revealing on-chain...`);
+      const revealTx = await contract.revealMatch(taskId, winnerIndex, winnerResult.signature);
+      await revealTx.wait();
 
-      // Call revealAndClaim with the real decrypted values and threshold signatures
-      const claimTx = await contract.revealAndClaim(
-        taskId,
-        winnerIndex,
-        winnerResult.signature,
-        payoutAmount,
-        payoutResult.signature
-      );
-      await claimTx.wait();
-
-      setStatus("Payout claimed successfully!");
-      setPayout(payoutAmount);
+      setAdvertiserId(winnerIndex);
+      setStatus(`Ad assigned! Advertiser #${winnerIndex} will be served on any site with EAX SDK. Visit /demo to see your ad and earn ATTN.`);
 
     } catch (e: any) {
         setStatus("Encryption/Transaction Error: " + (e.reason || e.message));
@@ -152,7 +153,7 @@ export default function Home() {
           Encrypted Attention Exchange
         </h1>
         <p className="text-zinc-400 text-lg mb-10 leading-relaxed text-balance">
-          Monetize your browsing history without revealing it. Your intent is encrypted locally, processed blindly by advertisers, and you get paid instantly.
+          Monetize your browsing history without revealing it. Your intent is encrypted locally, processed blindly by advertisers, and you get paid when ads are served.
         </p>
 
         <div className="bg-zinc-800/50 p-6 rounded-2xl mb-8 border border-zinc-700/50 flex flex-col gap-4">
@@ -183,10 +184,13 @@ export default function Home() {
             </div>
           )}
 
-          {payout !== null && (
-            <div className="mt-6 flex flex-col items-center p-6 bg-gradient-to-br from-emerald-500/10 to-emerald-900/10 border border-emerald-500/30 rounded-2xl">
-              <span className="text-emerald-400 text-lg font-bold mb-1">Attention Match!</span>
-              <span className="text-4xl font-extrabold text-white">+{payout} ATTN</span>
+          {advertiserId !== null && (
+            <div className="mt-6 flex flex-col items-center p-6 bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 border border-emerald-500/30 rounded-2xl">
+              <span className="text-emerald-400 text-lg font-bold mb-1">Ad Assigned!</span>
+              <span className="text-3xl font-extrabold text-white">Advertiser #{advertiserId}</span>
+              <a href="/demo" className="mt-4 text-sm text-cyan-400 hover:text-cyan-300 underline underline-offset-4 transition-colors">
+                View your ad & earn ATTN →
+              </a>
             </div>
           )}
         </div>
@@ -196,11 +200,14 @@ export default function Home() {
           disabled={!vector || !!txHash}
           className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-lg font-bold py-4 rounded-xl shadow-lg hover:shadow-emerald-500/25 hover:from-emerald-400 hover:to-teal-400 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed transform hover:-translate-y-0.5 active:translate-y-0"
         >
-          {!vector ? "Awaiting Extension..." : "Encrypt & Bid My Attention"}
+          {!vector ? "Awaiting Extension..." : "Encrypt & Match My Attention"}
         </button>
       </div>
       
-      <div className="absolute top-6 right-6 z-50">
+      <div className="absolute top-6 right-6 z-50 flex gap-3">
+        <a href="/demo" className="text-zinc-500 hover:text-cyan-400 transition-colors text-sm font-medium border border-zinc-700/50 rounded-lg px-4 py-2 hover:bg-zinc-800">
+            Publisher Demo →
+        </a>
         <a href="/advertiser" className="text-zinc-500 hover:text-emerald-400 transition-colors text-sm font-medium border border-zinc-700/50 rounded-lg px-4 py-2 hover:bg-zinc-800">
             Advertiser Portal →
         </a>
@@ -210,6 +217,8 @@ export default function Home() {
         <span>🔒 Fully Homomorphic Encryption</span>
         <span>·</span>
         <span>🧠 Local AI Inference</span>
+        <span>·</span>
+        <span>📡 Cross-Site Ad Serving</span>
       </div>
     </div>
   );
