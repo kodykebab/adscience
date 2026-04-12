@@ -47,7 +47,7 @@
       <!-- STATE 1: IDLE / EXTRACT -->
       <section id="state-idle" class="state-panel active">
         <div class="panel-card">
-          <div class="panel-icon">🔍</div>
+          <div class="panel-icon">[?]</div>
           <h2 id="idle-heading">Analyze Your Browsing</h2>
           <p class="panel-desc">We'll scan your recent browsing history locally. <strong>No data leaves your device.</strong></p>
           <button id="btn-extract" class="btn primary pulse-glow">
@@ -68,7 +68,7 @@
       <!-- STATE 3: DOMAINS FOUND + LLM INFERENCE -->
       <section id="state-domains" class="state-panel">
         <div class="panel-card">
-          <div class="panel-icon">🌐</div>
+          <div class="panel-icon">[WWW]</div>
           <h2>Domains Extracted</h2>
           <p class="panel-desc"><span id="domain-count">0</span> unique domains found</p>
           <div class="domain-scroll">
@@ -96,7 +96,7 @@
       <!-- STATE 5: INTERESTS IDENTIFIED -->
       <section id="state-interests" class="state-panel">
         <div class="panel-card">
-          <div class="panel-icon">🧠</div>
+          <div class="panel-icon">[*]</div>
           <h2>Your Interest Vector</h2>
           <div id="interest-tags" class="interest-tags"></div>
           <div class="vector-display">
@@ -139,9 +139,18 @@
 
       <!-- STATE 8: RESULTS -->
       <section id="state-results" class="state-panel">
-        <div class="panel-card results-card" style="padding: 40px 22px;">
-          <div class="result-check" style="margin-bottom: 24px;">✅</div>
-          <h2 style="font-size: 24px; margin-bottom: 30px;">Completed</h2>
+        <div class="panel-card results-card">
+          <div class="result-check">[OK]</div>
+          <h2>Match Complete!</h2>
+          
+          <div class="panel-desc" style="margin-top: 16px;">
+            The threshold network has verified your intent.
+          </div>
+
+          <div class="privacy-badge success">
+            <span class="badge-dot"></span>
+            Your intent has been privately matched. An ad is ready.
+          </div>
           <button id="btn-restart" class="btn secondary">
             <span>Run Again</span>
           </button>
@@ -152,7 +161,7 @@
 
     <!-- ===== FOOTER ===== -->
     <footer>
-      <div class="footer-shield">🛡️</div>
+      <div class="footer-shield">[#]</div>
       <span>Your data never leaves your device.</span>
     </footer>
 
