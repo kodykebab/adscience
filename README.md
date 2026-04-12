@@ -58,37 +58,32 @@ AdScience is a full-stack, end-to-end privacy-preserving advertising protocol. I
 ## 🗂️ Repository Structure
 
 ```
-adscience-1/
-├── base/                          # Main monorepo
-│   ├── app/                       # Next.js App Router pages
-│   │   ├── page.tsx               # Main EAX DApp (match hub)
-│   │   ├── advertiser/            # Advertiser registration portal
-│   │   └── demo/                  # Publisher demo (cross-site ad serving)
-│   ├── components/                # Shared React components
-│   ├── config/                    # Chain / wagmi / viem config
-│   ├── backend/                   # Express.js ad creative server
-│   │   └── server.js              # In-memory ad store, REST API
+adscience/
+├── base/                          # Monorepo core (backend, contracts, sdk, extension)
+│   ├── backend/                   # Express.js ad creative & analytics API server
+│   │   └── server.js              # Runs on port 4000; indexes ethers v6 events
 │   ├── contracts/                 # Solidity smart contracts (Foundry)
 │   │   ├── src/
-│   │   │   ├── EAX.sol            # Core FHE matching + impression contract
+│   │   │   ├── EAX.sol            # Core FHE matching + impression smart contract
 │   │   │   └── MockERC20.sol      # Test ATTN token
-│   │   ├── script/
-│   │   │   └── Deploy.s.sol       # Foundry deploy script
-│   │   └── foundry.toml
-│   ├── eax-sdk/                   # Publisher-facing JavaScript SDK
-│   │   ├── index.js               # Entry point (initEAX, getAd, renderAd...)
-│   │   ├── contract.js            # On-chain interaction layer
-│   │   └── api.js                 # Backend REST client
-│   ├── extension/                 # Chrome Extension (Manifest V3)
-│   │   ├── manifest.json
-│   │   ├── index.html / popup.html
-│   │   ├── content.js             # Cross-realm bridge (extension ↔ DApp)
-│   │   └── scripts/
-│   │       ├── popup.js           # State machine + local ML pipeline
-│   │       └── transformers/      # Bundled Transformers.js (WASM)
-│   ├── testing guide.md           # Full end-to-end testing walkthrough
-│   └── package.json               # Next.js frontend dependencies
-└── meow/                          # Legacy / alternate frontend (Next.js)
+│   │   └── script/Deploy.s.sol    # Smart contract deployment script
+│   ├── eax-sdk/                   # Publisher-facing JavaScript SDK (npm package)
+│   │   └── index.js               # Methods for fetching ad match & claiming payouts
+│   └── extension/                 # Chrome Extension (Manifest V3)
+│       ├── content.js             # DApp Web3 connection bridge
+│       └── scripts/               # Heavy local AI ML pipeline & Transformers.js WASM
+│
+├── super_new_new_frontend/        # Primary Next.js Modern EAX DApp 
+│   ├── app/                       
+│   │   ├── page.tsx               # User hub: encrypt & match local intent
+│   │   └── advertiser/            # Fully-featured live analytics metrics dashboard
+│   ├── components/                # Shared React UI component library
+│   └── analytics.md               # Backend analytics architectural specification
+│
+└── meow/                          # Publisher demo: "Meow" social media platform
+    ├── app/                       # Publisher simulation pages
+    ├── public/                    # Monochrome platform assets
+    └── package.json               # Configured to use eax-sdk for rendering ads and payouts
 ```
 
 ---
