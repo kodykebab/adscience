@@ -12,7 +12,7 @@ import { pipeline, env } from './transformers/transformers.min.js';
 // ============================================================
 
 // Setup environment for MV3 local ML
-env.allowLocalModels = false; 
+env.allowLocalModels = false;
 env.useBrowserCache = false; // Fix: use Chrome's native disk HTTP cache instead of buggy Cache API
 env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('scripts/transformers/');
 
@@ -65,11 +65,11 @@ document.addEventListener("DOMContentLoaded", () => {
   initAesthetics();
   initBlurLoad();
   initBlurText("idle-heading", 150);
-  
+
   // Reactivity texts
   const typingTexts = [
-    "Private Attention Market", 
-    "Zero-Knowledge Matching", 
+    "Private Attention Market",
+    "Zero-Knowledge Matching",
     "FHE Enabled Bidding"
   ];
   initTypingEffect("header-subtitle", typingTexts, 60, 40, 2000);
@@ -121,8 +121,6 @@ function generateHex(length) {
 // ============================================================
 //  PHASE A: History Extraction (REAL)
 // ============================================================
-let extractedEntries = []; // { domain, title }
-
 async function startExtraction() {
   goToState("state-extracting");
 
@@ -135,8 +133,7 @@ async function startExtraction() {
     }
 
     if (response && response.status === "success") {
-      extractedEntries = response.entries || [];
-      extractedDomains = response.domains || extractedEntries.map(e => e.domain);
+      extractedDomains = response.domains;
       showDomains(extractedDomains);
     }
   });
@@ -159,32 +156,17 @@ function showDomains(domains) {
 }
 
 // ============================================================
-//  PHASE B: Classification (Local ML via WebAssembly)
-//
-//  Strategy:
-//    1. Use PAGE TITLES from chrome.history (real natural language)
-//    2. Use descriptive hypothesis templates for each category
-//    3. Classify per-entry independently, aggregate, relative threshold
-//    4. NO hardcoded domain-to-category mappings
+//  PHASE B: LLM Classification (REAL Local ML via WebAssembly)
+//  Fix: Per-domain classification with NL expansion + relative
+//  thresholding. No hardcoded domain lists.
 // ============================================================
 let classifierPipeline = null;
-
-// Descriptive hypothesis templates — the NLI model checks
-// "Does this text entail this hypothesis?" which works far
-// better than single-word labels like "crypto".
-const CATEGORY_HYPOTHESES = {
-  crypto:  "This is about cryptocurrency, blockchain, web3, or digital tokens.",
-  ai:      "This is about artificial intelligence, machine learning, or AI tools.",
-  finance: "This is about finance, banking, investing, or money management.",
-  gaming:  "This is about video games, game development, or esports.",
-  dev:     "This is about software development, programming, coding, or developer tools.",
-};
 
 async function startClassification() {
   goToState("state-classifying");
 
   try {
-    // 1. Load model (first run downloads ~90MB, then cached)
+    // 1. Load model (downloads/caches on first run)
     if (!classifierPipeline) {
       document.querySelector("#state-classifying h2").textContent = "Loading AI Model...";
       document.querySelector("#state-classifying .panel-desc").textContent =
@@ -196,60 +178,48 @@ async function startClassification() {
 
     document.querySelector("#state-classifying h2").textContent = "Running Inference...";
 
-    // 2. Build classification inputs from entries
-    const entries = extractedEntries.slice(0, 30);
-    if (entries.length === 0) {
+    // 2. Cap domains & bail on empty
+    const domains = extractedDomains.slice(0, 30);
+    if (domains.length === 0) {
       userVector = [0, 0, 0, 0, 0];
       showInterests(userVector);
       return;
     }
 
-    // 3. Classify EACH entry independently using its title (or expanded domain as fallback)
-    const hypotheses = CATEGORIES.map(c => CATEGORY_HYPOTHESES[c]);
+    // 3. Classify EACH domain independently and accumulate scores
     const categoryScores = new Array(CATEGORIES.length).fill(0);
-    let classifiedCount = 0;
 
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-
-      // Build the best text we have for this entry
-      let text = '';
-      if (entry.title && entry.title.trim().length > 3) {
-        // Page title is available — this is real natural language
-        text = entry.title;
-      } else {
-        // Fallback: expand the domain name structurally
-        text = domainToDescription(entry.domain);
-      }
-
+    for (let i = 0; i < domains.length; i++) {
       document.querySelector("#state-classifying .panel-desc").textContent =
-        `Classifying ${i + 1}/${entries.length}: ${entry.domain}`;
+        `Classifying ${i + 1}/${domains.length}: ${domains[i]}`;
 
-      const result = await classifierPipeline(text, hypotheses, { multi_label: true });
+      // Expand bare hostname into a natural-language sentence
+      const domainText = domainToDescription(domains[i]);
 
-      // Map hypothesis results back to category indices
+      const result = await classifierPipeline(domainText, CATEGORIES, { multi_label: true });
+
       for (let c = 0; c < CATEGORIES.length; c++) {
-        const idx = result.labels.indexOf(hypotheses[c]);
+        const idx = result.labels.indexOf(CATEGORIES[c]);
         if (idx !== -1) {
           categoryScores[c] += result.scores[idx];
         }
       }
-      classifiedCount++;
     }
 
-    // 4. Average scores across all entries
-    const avgScores = categoryScores.map(s => s / classifiedCount);
+    // 4. Average scores across all domains
+    const avgScores = categoryScores.map(s => s / domains.length);
     console.log("Per-category avg scores:",
-      Object.fromEntries(CATEGORIES.map((c, i) => [c, avgScores[i].toFixed(4)]))
+      Object.fromEntries(CATEGORIES.map((c, i) => [c, avgScores[i].toFixed(3)]))
     );
 
-    // 5. Relative threshold: select top category + anything within 70% of top
+    // 5. Relative threshold: top category always selected,
+    //    plus anything within 60% of the top score.
     const maxScore = Math.max(...avgScores);
-    const RELATIVE_THRESHOLD = 0.7;
-    const MIN_ABS_THRESHOLD = 0.04;
+    const RELATIVE_THRESHOLD = 0.6;
+    const MIN_ABS_THRESHOLD = 0.05;
 
     userVector = avgScores.map(s => {
-      if (maxScore < MIN_ABS_THRESHOLD) return 0;
+      if (maxScore < MIN_ABS_THRESHOLD) return 0; // truly no signal
       return s >= maxScore * RELATIVE_THRESHOLD ? 1 : 0;
     });
 
@@ -262,21 +232,23 @@ async function startClassification() {
 }
 
 /**
- * Fallback: expand a bare hostname into natural language when
- * page title is unavailable. Uses URL structure only — no
- * hardcoded domain lists.
+ * Expand a bare hostname into a natural-language description so the
+ * NLI model has real words to reason about.
+ * Uses structural URL cues only — NO hardcoded domain lists.
  */
 function domainToDescription(domain) {
+  // Strip common utility subdomains and TLD suffixes
   let core = domain
     .replace(/^(www|mail|accounts|login|auth|api|app|m|my|id|play-lh)\./i, '')
     .replace(/\.(com|org|net|io|ai|dev|co|in|edu|gov|gg|tv|me|xyz|lk|co\.in|co\.uk|co\.id)$/i, '')
     .replace(/\./g, ' ');
 
+  // If nothing useful remains, keep the raw domain
   if (!core || core === 'localhost' || core.length <= 1) {
     core = domain;
   }
 
-  return `A website called ${core}. This is about ${core}.`;
+  return `A website called ${core}. This is a ${core} website.`;
 }
 
 function showInterests(vector) {
@@ -304,25 +276,21 @@ async function startEncryption() {
   const hexBlob = document.getElementById("hex-blob");
   hexBlob.textContent = "Locating Active EAX Next.js Instance...\n";
 
-  chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-      if (!tabs || tabs.length === 0) return;
-      
-      chrome.tabs.sendMessage(tabs[0].id, { type: "EAX_USER_VECTOR_TO_APP", vector: userVector }, function(response) {
-          if (chrome.runtime.lastError) {
-              hexBlob.textContent += "Error: Connect securely via localhost:3000 to trigger CoFHE primitives.";
-          } else {
-              hexBlob.textContent += "Vector securely injected into Metamask context.\n";
-              
-              // Automatically push to results to show pending interaction 
-              setTimeout(() => {
-                 goToState("state-results");
-                 const el = document.getElementById("res-winner");
-                 el.textContent = "Awaiting Fhenix Tx";
-                 document.getElementById("res-advertisers").textContent = "On-Chain";
-                 document.getElementById("res-payout").innerHTML = `Confirm in wallet`;
-              }, 1200);
-          }
-      });
+  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+    if (!tabs || tabs.length === 0) return;
+
+    chrome.tabs.sendMessage(tabs[0].id, { type: "EAX_USER_VECTOR_TO_APP", vector: userVector }, function (response) {
+      if (chrome.runtime.lastError) {
+        hexBlob.textContent += "Error: Connect securely via localhost:3000 to trigger CoFHE primitives.";
+      } else {
+        hexBlob.textContent += "Vector securely injected into Metamask context.\n";
+
+        // Automatically push to results to show pending interaction 
+        setTimeout(() => {
+          goToState("state-results");
+        }, 1200);
+      }
+    });
   });
 }
 
@@ -367,7 +335,7 @@ function decryptText(element, finalString, speed = 30) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
   let iterations = 0;
   element.classList.add("decrypt-text");
-  
+
   const interval = setInterval(() => {
     element.innerText = finalString
       .split("")
@@ -378,12 +346,12 @@ function decryptText(element, finalString, speed = 30) {
         return chars[Math.floor(Math.random() * chars.length)];
       })
       .join("");
-    
+
     if (iterations >= finalString.length) {
       clearInterval(interval);
       element.classList.remove("decrypt-text");
     }
-    
+
     iterations += 1 / 3;
   }, speed);
 }
@@ -395,7 +363,7 @@ function animateCountUp(element, endValue, duration) {
     const progress = Math.min((timestamp - startTimestamp) / duration, 1);
     const easeOut = 1 - Math.pow(1 - progress, 4);
     element.innerText = Math.floor(easeOut * endValue);
-    
+
     if (progress < 1) {
       window.requestAnimationFrame(step);
     } else {
@@ -409,7 +377,7 @@ function animateCountUp(element, endValue, duration) {
 function initTypingEffect(elementId, texts, typeSpeed = 50, deleteSpeed = 30, pause = 1500) {
   const el = document.getElementById(elementId);
   if (!el) return;
-  
+
   el.classList.add("typing-cursor");
   let textIndex = 0;
   let charIndex = 0;
@@ -438,7 +406,7 @@ function initTypingEffect(elementId, texts, typeSpeed = 50, deleteSpeed = 30, pa
 
     setTimeout(type, speed);
   }
-  
+
   // Clear initial text and start after slight delay
   el.textContent = "";
   setTimeout(type, 300);
@@ -457,10 +425,10 @@ function initBlurLoad() {
 function initBlurText(elementId, delay = 100) {
   const el = document.getElementById(elementId);
   if (!el) return;
-  
+
   const words = el.textContent.split(' ');
   el.innerHTML = '';
-  
+
   words.forEach((word, index) => {
     const span = document.createElement('span');
     span.textContent = word + (index < words.length - 1 ? '\u00A0' : ''); // non-breaking space
@@ -468,11 +436,11 @@ function initBlurText(elementId, delay = 100) {
     span.style.filter = 'blur(10px)';
     span.style.transform = 'translateY(5px)';
     span.style.display = 'inline-block';
-    
+
     // Animate using the existing keyframes
     span.style.animation = `blurRevealEffect 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards`;
     span.style.animationDelay = `${400 + index * delay}ms`; // start after main card load
-    
+
     el.appendChild(span);
   });
 }

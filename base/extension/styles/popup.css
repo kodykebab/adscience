@@ -343,7 +343,7 @@ main {
   width: 100%;
   padding: 13px 20px;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: 0px;
   font-family: 'Inter', sans-serif;
   font-size: 14px;
   font-weight: 600;
