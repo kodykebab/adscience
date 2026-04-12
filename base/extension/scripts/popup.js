@@ -179,7 +179,10 @@ async function startClassification() {
     // 2. Grab Domains Text 
     const textToClassify = extractedDomains.slice(0, 50).join(", ");
     if (!textToClassify) {
+      // Fallback: if history is completely empty, pick 1 random interest to ensure non-zero vector
       userVector = [0, 0, 0, 0, 0];
+      const randomIdx = Math.floor(Math.random() * 5);
+      userVector[randomIdx] = 1;
       showInterests(userVector);
       return;
     }
@@ -198,9 +201,25 @@ async function startClassification() {
       return 0;
     });
 
+    // 5. Accuracy check: Guarantee at least one 1
+    // If the model was unsure (all scores < 0.2), fallback to whichever category actually scored the absolute highest
+    if (userVector.every(val => val === 0)) {
+      let maxScore = -1;
+      let maxIdx = 0;
+      CATEGORIES.forEach((cat, index) => {
+        const resIdx = result.labels.indexOf(cat);
+        if (resIdx !== -1 && result.scores[resIdx] > maxScore) {
+          maxScore = result.scores[resIdx];
+          maxIdx = index;
+        }
+      });
+      userVector[maxIdx] = 1;
+    }
+
   } catch (err) {
     console.error("Local ML error:", err);
-    userVector = [0, 0, 0, 0, 0]; 
+    // On unexpected crash, default to 1 active to avoid contract matching failure
+    userVector = [1, 0, 0, 0, 0]; 
   }
 
   showInterests(userVector);
