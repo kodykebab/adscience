@@ -4,6 +4,11 @@
 
 AdScience is a full-stack, end-to-end privacy-preserving advertising protocol. It classifies user interests **locally** using an in-browser ML model, encrypts the resulting intent vector via **FHE (CoFHE/Fhenix)**, runs **encrypted dot-product matching** on-chain against advertisers, and pays users in `ATTN` tokens when they view a matched ad — all without ever revealing raw browsing data to any server or advertiser.
 
+***CONTRACT ADDRESS 0xd4454243340270f0d6de17744b8e6a894dfe5e5f***
+
+
+***ERC-20 CONTRACT  0xe68aac9560ece6d54212d74e27c93c4215bf204e***
+
 ---
 
 ## 📐 System Architecture

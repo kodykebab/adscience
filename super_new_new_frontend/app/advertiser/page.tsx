@@ -1,11 +1,21 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { ethers, BrowserProvider } from "ethers";
 import EAXJson from "../../contracts/out/EAX.sol/EAX.json";
 import MockERC20Json from "../../contracts/out/MockERC20.sol/MockERC20.json";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
+
+interface AnalyticsData {
+  impressions: number;
+  totalSpend: number;
+  spendRate: number;
+  avgPayoutInterval: string;
+  winRate: number;
+  remainingBudget: number;
+  matchCount: number;
+}
 
 export default function RegisterAdvertiser() {
   const [bid, setBid] = useState<number>(10);
@@ -21,6 +31,44 @@ export default function RegisterAdvertiser() {
   const [adCta, setAdCta] = useState("Learn More");
   const [adLink, setAdLink] = useState("");
 
+  // Analytics state
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const [lookupId, setLookupId] = useState("");
+  const [analyticsError, setAnalyticsError] = useState("");
+
+  // Poll analytics whenever assignedId is set
+  useEffect(() => {
+    if (assignedId === null) return;
+    setAnalyticsError("");
+
+    const fetchAnalytics = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/analytics?advertiserId=${assignedId}`);
+        if (res.ok) {
+          setAnalytics(await res.json());
+          setAnalyticsError("");
+        } else {
+          setAnalyticsError("Backend returned an error.");
+        }
+      } catch {
+        setAnalyticsError("Cannot reach backend at " + BACKEND_URL);
+      }
+    };
+
+    fetchAnalytics();
+    const interval = setInterval(fetchAnalytics, 3000);
+    return () => clearInterval(interval);
+  }, [assignedId]);
+
+  const handleLookup = () => {
+    const id = parseInt(lookupId);
+    if (isNaN(id) || id < 0) {
+      setAnalyticsError("Enter a valid advertiser ID (0, 1, 2, ...)");
+      return;
+    }
+    setAssignedId(id);
+  };
+
   const toggleCategory = (index: number) => {
     const newVector = [...vector];
     newVector[index] = newVector[index] === 1 ? 0 : 1;
@@ -28,22 +76,22 @@ export default function RegisterAdvertiser() {
   };
 
   const handleFaucet = async () => {
-      setStatus("Requesting 10,000 ATTN from faucet...");
-      try {
-          if (!window.ethereum) { setStatus("Error: No wallet detected."); return; }
-          const provider = new BrowserProvider(window.ethereum);
-          await provider.send("eth_requestAccounts", []);
-          const signer = await provider.getSigner();
-          const tokenAddress = process.env.NEXT_PUBLIC_ATTN_TOKEN_ADDRESS || "";
-          if (!tokenAddress) { setStatus("Error: ATTN token address not set."); return; }
-          const token = new ethers.Contract(tokenAddress, MockERC20Json.abi, signer);
-          const tx = await token.faucet();
-          setStatus("Waiting for faucet confirmation...");
-          await tx.wait();
-          setStatus("✓ Minted 10,000 ATTN test tokens!");
-      } catch (e: any) {
-          setStatus("Faucet Error: " + (e.reason || e.message));
-      }
+    setStatus("Requesting 10,000 ATTN from faucet...");
+    try {
+      if (!window.ethereum) { setStatus("Error: No wallet detected."); return; }
+      const provider = new BrowserProvider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      const signer = await provider.getSigner();
+      const tokenAddress = process.env.NEXT_PUBLIC_ATTN_TOKEN_ADDRESS || "";
+      if (!tokenAddress) { setStatus("Error: ATTN token address not set."); return; }
+      const token = new ethers.Contract(tokenAddress, MockERC20Json.abi, signer);
+      const tx = await token.faucet();
+      setStatus("Waiting for faucet confirmation...");
+      await tx.wait();
+      setStatus("✓ Minted 10,000 ATTN test tokens!");
+    } catch (e: any) {
+      setStatus("Faucet Error: " + (e.reason || e.message));
+    }
   };
 
   const handleRegister = async () => {
@@ -89,13 +137,13 @@ export default function RegisterAdvertiser() {
       const res = await fetch(`${BACKEND_URL}/registerAd`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ advertiserId, title: adTitle, image: adImage, cta: adCta, link: adLink }),
+        body: JSON.stringify({ advertiserId, title: adTitle, image: adImage, cta: adCta, link: adLink, budget }),
       });
 
       if (!res.ok) { setStatus(`On-chain OK but creative upload failed. Backend running?`); return; }
       setStatus(`✓ Advertiser #${advertiserId} fully registered!`);
     } catch (e: any) {
-        setStatus("Error: " + (e.reason || e.message));
+      setStatus("Error: " + (e.reason || e.message));
     }
   };
 
@@ -117,7 +165,7 @@ export default function RegisterAdvertiser() {
         </div>
       </div>
 
-      <div className="max-w-3xl mx-auto px-6 py-16">
+      <div className="max-w-4xl mx-auto px-6 py-16">
         {/* Header */}
         <div className="mb-12">
           <span className="inline-flex items-center gap-3 text-sm font-mono text-white/40 mb-4">
@@ -134,6 +182,122 @@ export default function RegisterAdvertiser() {
             EAX matches your targeting against encrypted user vectors on-chain.
           </p>
         </div>
+
+        {/* ─── Analytics Lookup ─── */}
+        <div className="mb-12 bg-white/[0.02] border border-white/10 rounded-2xl p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-xs font-mono text-white/50 uppercase tracking-widest">
+              Live Analytics Dashboard
+            </span>
+          </div>
+          <div className="flex gap-3 items-end">
+            <div className="flex-1">
+              <label className="block text-xs text-white/40 uppercase tracking-wide mb-2 font-mono">
+                Advertiser ID
+              </label>
+              <input
+                type="number"
+                min="0"
+                placeholder="Enter ID (e.g. 0, 1, 2...)"
+                value={lookupId}
+                onChange={(e) => setLookupId(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleLookup()}
+                className="w-full bg-black text-white px-4 py-3 rounded-xl border border-white/10 focus:border-white/30 text-sm font-mono focus:outline-none transition-colors"
+              />
+            </div>
+            <button
+              onClick={handleLookup}
+              className="px-6 py-3 bg-white text-black text-sm font-bold rounded-xl hover:bg-white/90 transition-all"
+            >
+              Load Metrics
+            </button>
+          </div>
+
+          {analyticsError && (
+            <p className="mt-3 text-xs text-red-400 font-mono">{analyticsError}</p>
+          )}
+
+          {/* Analytics Cards */}
+          {assignedId !== null && analytics && (
+            <div className="mt-6">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-sm text-white/60 font-mono">
+                  Advertiser <span className="text-white font-bold">#{assignedId}</span>
+                </span>
+                <span className="text-xs text-white/30 font-mono">
+                  Polling every 3s
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                {/* Impressions */}
+                <div className="bg-black border border-white/[0.08] rounded-xl p-5 group hover:border-white/20 transition-colors">
+                  <div className="text-white/35 text-[10px] font-mono uppercase tracking-widest mb-3">Impressions</div>
+                  <div className="text-3xl font-display text-white tabular-nums">
+                    {analytics.impressions}
+                  </div>
+                </div>
+
+                {/* Total Spend */}
+                <div className="bg-black border border-white/[0.08] rounded-xl p-5 group hover:border-white/20 transition-colors">
+                  <div className="text-white/35 text-[10px] font-mono uppercase tracking-widest mb-3">Total Spend</div>
+                  <div className="text-3xl font-display text-white tabular-nums">
+                    {analytics.totalSpend.toLocaleString()}
+                    <span className="text-sm text-white/25 ml-1">ATTN</span>
+                  </div>
+                </div>
+
+                {/* Spend Rate */}
+                <div className="bg-black border border-white/[0.08] rounded-xl p-5 group hover:border-white/20 transition-colors">
+                  <div className="text-white/35 text-[10px] font-mono uppercase tracking-widest mb-3">Spend Rate</div>
+                  <div className="text-3xl font-display text-white tabular-nums">
+                    {analytics.spendRate}
+                    <span className="text-sm text-white/25 ml-1">/ min</span>
+                  </div>
+                </div>
+
+                {/* Avg Payout Interval */}
+                <div className="bg-black border border-white/[0.08] rounded-xl p-5 group hover:border-white/20 transition-colors">
+                  <div className="text-white/35 text-[10px] font-mono uppercase tracking-widest mb-3">Payout Interval</div>
+                  <div className="text-3xl font-display text-white tabular-nums">
+                    {analytics.avgPayoutInterval}
+                  </div>
+                  <div className="text-[10px] text-white/20 mt-1 font-mono">avg between payouts</div>
+                </div>
+
+                {/* Win Rate */}
+                <div className="bg-black border border-white/[0.08] rounded-xl p-5 group hover:border-white/20 transition-colors">
+                  <div className="text-white/35 text-[10px] font-mono uppercase tracking-widest mb-3">Win Rate</div>
+                  <div className="text-3xl font-display text-white tabular-nums">
+                    {(analytics.winRate * 100).toFixed(0)}
+                    <span className="text-sm text-white/25 ml-1">%</span>
+                  </div>
+                  <div className="text-[10px] text-white/20 mt-1 font-mono">{analytics.matchCount} matches</div>
+                </div>
+
+                {/* Remaining Budget */}
+                <div className="bg-black border border-white/[0.08] rounded-xl p-5 group hover:border-white/20 transition-colors">
+                  <div className="text-white/35 text-[10px] font-mono uppercase tracking-widest mb-3">Budget Left</div>
+                  <div className="text-3xl font-display text-white tabular-nums">
+                    {analytics.remainingBudget.toLocaleString()}
+                    <span className="text-sm text-white/25 ml-1">ATTN</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {assignedId !== null && !analytics && !analyticsError && (
+            <div className="mt-6 text-center py-8">
+              <div className="inline-block w-5 h-5 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+              <p className="text-xs text-white/30 mt-3 font-mono">Loading metrics...</p>
+            </div>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div className="border-t border-white/[0.06] my-12" />
 
         {/* Status Bar */}
         <div className="flex items-center justify-between bg-white/[0.03] border border-white/10 rounded-xl px-5 py-3 mb-8">
