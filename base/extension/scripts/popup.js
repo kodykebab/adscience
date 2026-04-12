@@ -121,6 +121,8 @@ function generateHex(length) {
 // ============================================================
 //  PHASE A: History Extraction (REAL)
 // ============================================================
+let extractedEntries = []; // { domain, title }
+
 async function startExtraction() {
   goToState("state-extracting");
 
@@ -133,7 +135,8 @@ async function startExtraction() {
     }
 
     if (response && response.status === "success") {
-      extractedDomains = response.domains;
+      extractedEntries = response.entries || [];
+      extractedDomains = response.domains || extractedEntries.map(e => e.domain);
       showDomains(extractedDomains);
     }
   });
@@ -156,54 +159,124 @@ function showDomains(domains) {
 }
 
 // ============================================================
-//  PHASE B: LLM Classification (REAL Local ML via WebAssembly)
+//  PHASE B: Classification (Local ML via WebAssembly)
+//
+//  Strategy:
+//    1. Use PAGE TITLES from chrome.history (real natural language)
+//    2. Use descriptive hypothesis templates for each category
+//    3. Classify per-entry independently, aggregate, relative threshold
+//    4. NO hardcoded domain-to-category mappings
 // ============================================================
 let classifierPipeline = null;
+
+// Descriptive hypothesis templates — the NLI model checks
+// "Does this text entail this hypothesis?" which works far
+// better than single-word labels like "crypto".
+const CATEGORY_HYPOTHESES = {
+  crypto:  "This is about cryptocurrency, blockchain, web3, or digital tokens.",
+  ai:      "This is about artificial intelligence, machine learning, or AI tools.",
+  finance: "This is about finance, banking, investing, or money management.",
+  gaming:  "This is about video games, game development, or esports.",
+  dev:     "This is about software development, programming, coding, or developer tools.",
+};
 
 async function startClassification() {
   goToState("state-classifying");
 
   try {
-    // 1. Initialize local webassembly transformer model (downloads/caches on first run)
+    // 1. Load model (first run downloads ~90MB, then cached)
     if (!classifierPipeline) {
       document.querySelector("#state-classifying h2").textContent = "Loading AI Model...";
-      document.querySelector("#state-classifying .panel-desc").textContent = "Downloading & caching model (~90MB). Next runs will be instant.";
-      
-      // Using a fast distilled zero-shot classification model
-      classifierPipeline = await pipeline('zero-shot-classification', 'Xenova/mobilebert-uncased-mnli');
+      document.querySelector("#state-classifying .panel-desc").textContent =
+        "Downloading & caching model (~90MB). Next runs will be instant.";
+      classifierPipeline = await pipeline(
+        'zero-shot-classification', 'Xenova/mobilebert-uncased-mnli'
+      );
     }
 
     document.querySelector("#state-classifying h2").textContent = "Running Inference...";
-    document.querySelector("#state-classifying .panel-desc").textContent = "Mapping history linearly onto categories...";
 
-    // 2. Grab Domains Text 
-    const textToClassify = extractedDomains.slice(0, 50).join(", ");
-    if (!textToClassify) {
+    // 2. Build classification inputs from entries
+    const entries = extractedEntries.slice(0, 30);
+    if (entries.length === 0) {
       userVector = [0, 0, 0, 0, 0];
       showInterests(userVector);
       return;
     }
 
-    // 3. Local Model Inference for exact labels (Multi-Label)
-    const result = await classifierPipeline(textToClassify, CATEGORIES, { multi_label: true });
-    
-    console.log("Local ML Zero-Shot Results:", result);
+    // 3. Classify EACH entry independently using its title (or expanded domain as fallback)
+    const hypotheses = CATEGORIES.map(c => CATEGORY_HYPOTHESES[c]);
+    const categoryScores = new Array(CATEGORIES.length).fill(0);
+    let classifiedCount = 0;
 
-    // 4. Map into a binary vector by score threshold (e.g. > 0.2 means likely active interest)
-    userVector = CATEGORIES.map((cat) => {
-      const idx = result.labels.indexOf(cat);
-      if (idx !== -1 && result.scores[idx] > 0.2) {
-        return 1;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+
+      // Build the best text we have for this entry
+      let text = '';
+      if (entry.title && entry.title.trim().length > 3) {
+        // Page title is available — this is real natural language
+        text = entry.title;
+      } else {
+        // Fallback: expand the domain name structurally
+        text = domainToDescription(entry.domain);
       }
-      return 0;
+
+      document.querySelector("#state-classifying .panel-desc").textContent =
+        `Classifying ${i + 1}/${entries.length}: ${entry.domain}`;
+
+      const result = await classifierPipeline(text, hypotheses, { multi_label: true });
+
+      // Map hypothesis results back to category indices
+      for (let c = 0; c < CATEGORIES.length; c++) {
+        const idx = result.labels.indexOf(hypotheses[c]);
+        if (idx !== -1) {
+          categoryScores[c] += result.scores[idx];
+        }
+      }
+      classifiedCount++;
+    }
+
+    // 4. Average scores across all entries
+    const avgScores = categoryScores.map(s => s / classifiedCount);
+    console.log("Per-category avg scores:",
+      Object.fromEntries(CATEGORIES.map((c, i) => [c, avgScores[i].toFixed(4)]))
+    );
+
+    // 5. Relative threshold: select top category + anything within 70% of top
+    const maxScore = Math.max(...avgScores);
+    const RELATIVE_THRESHOLD = 0.7;
+    const MIN_ABS_THRESHOLD = 0.04;
+
+    userVector = avgScores.map(s => {
+      if (maxScore < MIN_ABS_THRESHOLD) return 0;
+      return s >= maxScore * RELATIVE_THRESHOLD ? 1 : 0;
     });
 
   } catch (err) {
-    console.error("Local ML error:", err);
-    userVector = [0, 0, 0, 0, 0]; 
+    console.error("Classification error:", err);
+    userVector = [0, 0, 0, 0, 0];
   }
 
   showInterests(userVector);
+}
+
+/**
+ * Fallback: expand a bare hostname into natural language when
+ * page title is unavailable. Uses URL structure only — no
+ * hardcoded domain lists.
+ */
+function domainToDescription(domain) {
+  let core = domain
+    .replace(/^(www|mail|accounts|login|auth|api|app|m|my|id|play-lh)\./i, '')
+    .replace(/\.(com|org|net|io|ai|dev|co|in|edu|gov|gg|tv|me|xyz|lk|co\.in|co\.uk|co\.id)$/i, '')
+    .replace(/\./g, ' ');
+
+  if (!core || core === 'localhost' || core.length <= 1) {
+    core = domain;
+  }
+
+  return `A website called ${core}. This is about ${core}.`;
 }
 
 function showInterests(vector) {
