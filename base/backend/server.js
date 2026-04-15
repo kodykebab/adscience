@@ -2,10 +2,19 @@ require("dotenv").config({ path: "../../super_new_new_frontend/.env.local" });
 const express = require("express");
 const cors = require("cors");
 const { ethers } = require("ethers");
+const { createPurchasingAgentService } = require("./services/agent");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const purchasingAgent = createPurchasingAgentService({
+  auditLogPath: `${__dirname}/audit/purchase-agent.jsonl`,
+  defaultBalances: {
+    USDC: 1000,
+    ATTN: 1000,
+  },
+});
 
 // ── In-memory stores ─────────────────────────────────────────────
 const ads = new Map();       // advertiserId → ad creative
@@ -172,6 +181,68 @@ app.get("/analytics", (req, res) => {
   });
 });
 
+// Purchasing agent health + audit access
+app.get("/agent/health", (_req, res) => {
+  res.json(purchasingAgent.health());
+});
+
+app.get("/agent/audit", (req, res) => {
+  const { userAddress, requestId, type, merchantId } = req.query;
+  res.json(
+    purchasingAgent.getAuditTrail({
+      userAddress: userAddress || undefined,
+      requestId: requestId || undefined,
+      type: type || undefined,
+      merchantId: merchantId || undefined,
+    })
+  );
+});
+
+app.get("/agent/request/:requestId", (req, res) => {
+  const request = purchasingAgent.getRequest(req.params.requestId);
+  if (!request) {
+    return res.status(404).json({ error: "Request not found" });
+  }
+  res.json(request);
+});
+
+app.post("/agent/purchase", async (req, res) => {
+  try {
+    const result = await purchasingAgent.previewPurchase(req.body || {});
+    const statusCode = result.status === "declined" ? 403 : 200;
+    res.status(statusCode).json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/agent/purchase/:requestId/confirm", async (req, res) => {
+  try {
+    const result = await purchasingAgent.confirmPurchase(req.params.requestId, req.body || {});
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/agent/revoke", (req, res) => {
+  try {
+    const result = purchasingAgent.revokePermissions(req.body?.userAddress, req.body?.reason);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/agent/restore", (req, res) => {
+  try {
+    const result = purchasingAgent.restorePermissions(req.body?.userAddress);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 // Health endpoint
 app.get("/health", (_req, res) => {
   res.json({
@@ -184,7 +255,7 @@ app.get("/health", (_req, res) => {
 
 // Register ad creative
 app.post("/registerAd", (req, res) => {
-  const { advertiserId, title, image, cta, link, budget } = req.body;
+  const { advertiserId, title, image, cta, link, budget, purchaseAmount, purchaseCurrency, requiresConfirmation, merchantId } = req.body;
   if (advertiserId === undefined || !title || !link) {
     return res.status(400).json({ error: "Missing required fields: advertiserId, title, link" });
   }
@@ -196,6 +267,10 @@ app.post("/registerAd", (req, res) => {
     cta: cta || "Learn More",
     link,
     budget: Number(budget) || 0,
+    purchaseAmount: Number(purchaseAmount) || 0,
+    purchaseCurrency: purchaseCurrency || "USDC",
+    requiresConfirmation: Boolean(requiresConfirmation),
+    merchantId: merchantId || `merchant-${Number(advertiserId)}`,
     registeredAt: Date.now(),
   });
 
@@ -223,8 +298,11 @@ app.listen(PORT, () => {
   console.log(`  ║  EAX Analytics Backend on :${PORT}       ║`);
   console.log(`  ╠══════════════════════════════════════╣`);
   console.log(`  ║  GET  /analytics?advertiserId=X      ║`);
+  console.log(`  ║  POST /agent/purchase                ║`);
+  console.log(`  ║  POST /agent/purchase/:id/confirm    ║`);
   console.log(`  ║  POST /registerAd                    ║`);
   console.log(`  ║  GET  /getAd/:advertiserId           ║`);
   console.log(`  ║  GET  /health                        ║`);
+  console.log(`  ║  GET  /agent/health                  ║`);
   console.log(`  ╚══════════════════════════════════════╝\n`);
 });

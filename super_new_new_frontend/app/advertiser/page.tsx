@@ -30,6 +30,9 @@ export default function RegisterAdvertiser() {
   const [adImage, setAdImage] = useState("");
   const [adCta, setAdCta] = useState("Learn More");
   const [adLink, setAdLink] = useState("");
+  const [purchaseAmount, setPurchaseAmount] = useState<number>(0);
+  const [purchaseCurrency, setPurchaseCurrency] = useState("USDC");
+  const [requiresConfirmation, setRequiresConfirmation] = useState(false);
 
   // Analytics state
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -137,7 +140,17 @@ export default function RegisterAdvertiser() {
       const res = await fetch(`${BACKEND_URL}/registerAd`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ advertiserId, title: adTitle, image: adImage, cta: adCta, link: adLink, budget }),
+        body: JSON.stringify({
+          advertiserId,
+          title: adTitle,
+          image: adImage,
+          cta: adCta,
+          link: adLink,
+          budget,
+          purchaseAmount,
+          purchaseCurrency,
+          requiresConfirmation,
+        }),
       });
 
       if (!res.ok) { setStatus(`On-chain OK but creative upload failed. Backend running?`); return; }
@@ -410,6 +423,56 @@ export default function RegisterAdvertiser() {
                 />
               </div>
             </div>
+          </div>
+
+          <div className="bg-white/[0.02] border border-white/10 rounded-2xl p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-white/80 mb-2 tracking-wide uppercase">
+                Purchase Metadata
+              </label>
+              <p className="text-xs text-white/35">
+                Optional values used by the backend purchasing agent when this ad is clicked.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-white/40 uppercase tracking-wide mb-2 font-mono">
+                  Purchase Amount
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={purchaseAmount}
+                  onChange={(e) => setPurchaseAmount(parseFloat(e.target.value) || 0)}
+                  className="w-full bg-black text-white px-4 py-3 rounded-xl border border-white/10 focus:border-white/30 text-sm font-mono focus:outline-none transition-colors"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-white/40 uppercase tracking-wide mb-2 font-mono">
+                  Currency
+                </label>
+                <select
+                  value={purchaseCurrency}
+                  onChange={(e) => setPurchaseCurrency(e.target.value)}
+                  className="w-full bg-black text-white px-4 py-3 rounded-xl border border-white/10 focus:border-white/30 text-sm font-mono focus:outline-none transition-colors"
+                >
+                  <option value="USDC">USDC</option>
+                  <option value="ATTN">ATTN</option>
+                </select>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-3 text-sm text-white/70">
+              <input
+                type="checkbox"
+                checked={requiresConfirmation}
+                onChange={(e) => setRequiresConfirmation(e.target.checked)}
+                className="h-4 w-4 rounded border-white/20 bg-black text-white focus:ring-white/30"
+              />
+              Require user confirmation before settlement
+            </label>
           </div>
 
           {/* ─── Submit ─── */}

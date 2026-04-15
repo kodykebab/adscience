@@ -7,6 +7,85 @@
 
 import { getConfig, getUserAddress, getActiveAdvertiser, recordImpression } from "./contract.js";
 
+function shouldUsePurchaseAgent(ad, options = {}) {
+  if (options.enablePurchasingAgent === false) return false;
+  if (options.enablePurchasingAgent === true) return true;
+
+  const purchaseAmount = Number(ad?.purchaseAmount || ad?.price || options.purchaseAmount || 0);
+  return purchaseAmount > 0 || Boolean(ad?.requiresConfirmation);
+}
+
+function buildPurchasePayload(ad, options = {}) {
+  const userAddress = getUserAddress();
+  const purchaseAmount = Number(ad?.purchaseAmount || ad?.price || options.purchaseAmount || 0);
+
+  return {
+    userAddress,
+    merchantId: options.merchantId || ad?.merchantId || `merchant-${ad?.advertiserId ?? "unknown"}`,
+    productUrl: ad?.link,
+    title: ad?.title,
+    adId: ad?.advertiserId,
+    amount: purchaseAmount,
+    currency: options.purchaseCurrency || ad?.purchaseCurrency || "USDC",
+    requiresConfirmation: options.requiresConfirmation ?? ad?.requiresConfirmation ?? purchaseAmount > 25,
+    metadata: options.metadata || {},
+    idempotencyKey:
+      options.idempotencyKey ||
+      `purchase:${String(userAddress || "anonymous").toLowerCase()}:${String(ad?.advertiserId ?? "x")}:${String(ad?.link ?? "")}:${purchaseAmount}`,
+  };
+}
+
+async function submitPurchaseIntent(ad, options = {}) {
+  const config = getConfig();
+  if (!config?.backendUrl) {
+    throw new Error("Call initEAX() first");
+  }
+
+  const payload = buildPurchasePayload(ad, options);
+  if (!payload.userAddress) {
+    throw new Error("A connected wallet is required for purchase authorization");
+  }
+
+  const response = await fetch(`${config.backendUrl}/agent/purchase`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const result = await response.json();
+  if (!response.ok && result?.error) {
+    throw new Error(result.error);
+  }
+
+  return result;
+}
+
+async function confirmPurchaseIntent(requestId, options = {}) {
+  const config = getConfig();
+  if (!config?.backendUrl) {
+    throw new Error("Call initEAX() first");
+  }
+
+  const payload = {
+    approved: options.approved !== false,
+    approvedBy: options.approvedBy || getUserAddress(),
+    mode: options.mode || "manual",
+  };
+
+  const response = await fetch(`${config.backendUrl}/agent/purchase/${requestId}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const result = await response.json();
+  if (!response.ok && result?.error) {
+    throw new Error(result.error);
+  }
+
+  return result;
+}
+
 /**
  * Get the matched ad for the current user.
  * Reads activeAdvertiser from the contract, then fetches the creative from the backend.
@@ -45,7 +124,10 @@ export async function renderAd(container, ad, options = {}) {
   const { 
       triggerImpression = true, 
       interactive = false,
-      onImpressionRecorded = null 
+      onImpressionRecorded = null,
+      enablePurchasingAgent = false,
+      confirmPurchase: confirmPurchaseCallback = null,
+      onPurchaseDecision = null,
   } = options;
 
   if (!container || !ad) {
@@ -57,6 +139,7 @@ export async function renderAd(container, ad, options = {}) {
   const uniqueId = Math.random().toString(36).substr(2, 9);
   const btnId = `eax-btn-${uniqueId}`;
   const statusId = `eax-status-${uniqueId}`;
+  const ctaId = `eax-cta-${uniqueId}`;
 
   // Render the ad card
   container.innerHTML = `
@@ -99,7 +182,7 @@ export async function renderAd(container, ad, options = {}) {
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
       ">${ad.title}</h3>
-      <a href="${ad.link}" target="_blank" rel="noopener noreferrer" style="
+      <a href="${ad.link}" id="${ctaId}" target="_blank" rel="noopener noreferrer" style="
         display: inline-block;
         background: linear-gradient(to right, #8b5cf6, #ec4899);
         color: #fff;
@@ -136,6 +219,75 @@ export async function renderAd(container, ad, options = {}) {
       `}
     </div>
   `;
+
+  const ctaEl = container.querySelector(`#${ctaId}`);
+  if (ctaEl && shouldUsePurchaseAgent(ad, { ...options, enablePurchasingAgent })) {
+    ctaEl.addEventListener("click", async (event) => {
+      event.preventDefault();
+
+      const originalLabel = ctaEl.textContent || ad.cta || "Learn More";
+      ctaEl.textContent = "Checking purchase policy...";
+      ctaEl.style.pointerEvents = "none";
+      ctaEl.style.opacity = "0.75";
+
+      let purchaseWindow = null;
+      try {
+        purchaseWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
+
+        const preview = await submitPurchaseIntent(ad, options);
+
+        if (preview.status === "declined") {
+          ctaEl.textContent = originalLabel;
+          ctaEl.style.pointerEvents = "auto";
+          ctaEl.style.opacity = "1";
+          if (onPurchaseDecision) onPurchaseDecision(preview);
+          console.warn("[EAX SDK] Purchase declined:", preview.reasons?.join(", ") || "policy blocked");
+          if (purchaseWindow) purchaseWindow.close();
+          return;
+        }
+
+        let finalized = preview;
+        if (preview.status === "pending_confirmation") {
+          const approval = confirmPurchaseCallback
+            ? await confirmPurchaseCallback(preview)
+            : window.confirm(
+                `Approve ${preview.amount} ${preview.currency} purchase from ${preview.title}?`
+              );
+
+          if (approval === false) {
+            finalized = await confirmPurchaseIntent(preview.requestId, { approved: false, mode: "manual" });
+            ctaEl.textContent = originalLabel;
+            ctaEl.style.pointerEvents = "auto";
+            ctaEl.style.opacity = "1";
+            if (onPurchaseDecision) onPurchaseDecision(finalized);
+            if (purchaseWindow) purchaseWindow.close();
+            return;
+          }
+
+          finalized = await confirmPurchaseIntent(preview.requestId, { approved: true, mode: "manual" });
+        }
+
+        if (onPurchaseDecision) onPurchaseDecision(finalized);
+
+        if (purchaseWindow) {
+          purchaseWindow.location.href = ad.link;
+        } else {
+          window.location.assign(ad.link);
+        }
+
+        ctaEl.textContent = originalLabel;
+        ctaEl.style.pointerEvents = "auto";
+        ctaEl.style.opacity = "1";
+      } catch (err) {
+        console.warn("[EAX SDK] Purchase flow failed:", err.message);
+        ctaEl.textContent = originalLabel;
+        ctaEl.style.pointerEvents = "auto";
+        ctaEl.style.opacity = "1";
+        if (purchaseWindow) purchaseWindow.close();
+        if (onPurchaseDecision) onPurchaseDecision({ status: "error", error: err.message });
+      }
+    });
+  }
 
   if (interactive) {
     const btn = container.querySelector(`#${btnId}`);
