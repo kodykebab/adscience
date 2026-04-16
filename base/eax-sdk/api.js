@@ -52,7 +52,18 @@ async function submitPurchaseIntent(ad, options = {}) {
     body: JSON.stringify(payload),
   });
 
-  const result = await response.json();
+  let result;
+  if (response.headers.get("content-type")?.includes("application/json")) {
+    result = await response.json();
+  } else {
+    try {
+      result = await response.json();
+    } catch {
+      const text = await response.text();
+      throw new Error(`Unexpected response: ${response.status} ${text.slice(0, 100)}`);
+    }
+  }
+
   if (!response.ok && result?.error) {
     throw new Error(result.error);
   }
@@ -78,7 +89,18 @@ async function confirmPurchaseIntent(requestId, options = {}) {
     body: JSON.stringify(payload),
   });
 
-  const result = await response.json();
+  let result;
+  if (response.headers.get("content-type")?.includes("application/json")) {
+    result = await response.json();
+  } else {
+    try {
+      result = await response.json();
+    } catch {
+      const text = await response.text();
+      throw new Error(`Unexpected response: ${response.status} ${text.slice(0, 100)}`);
+    }
+  }
+
   if (!response.ok && result?.error) {
     throw new Error(result.error);
   }
@@ -125,11 +147,7 @@ export async function renderAd(container, ad, options = {}) {
       triggerImpression = true, 
       interactive = false,
       onImpressionRecorded = null,
-      enablePurchasingAgent = false,
-      confirmPurchase: confirmPurchaseCallback = null,
-      onPurchaseDecision = null,
-  } = options;
-
+      enablePurchasingAgent,
   if (!container || !ad) {
     console.warn("[EAX SDK] renderAd: missing container or ad");
     return {};
@@ -230,10 +248,7 @@ export async function renderAd(container, ad, options = {}) {
       ctaEl.style.pointerEvents = "none";
       ctaEl.style.opacity = "0.75";
 
-      let purchaseWindow = null;
       try {
-        purchaseWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
-
         const preview = await submitPurchaseIntent(ad, options);
 
         if (preview.status === "declined") {
@@ -242,7 +257,6 @@ export async function renderAd(container, ad, options = {}) {
           ctaEl.style.opacity = "1";
           if (onPurchaseDecision) onPurchaseDecision(preview);
           console.warn("[EAX SDK] Purchase declined:", preview.reasons?.join(", ") || "policy blocked");
-          if (purchaseWindow) purchaseWindow.close();
           return;
         }
 
@@ -260,7 +274,6 @@ export async function renderAd(container, ad, options = {}) {
             ctaEl.style.pointerEvents = "auto";
             ctaEl.style.opacity = "1";
             if (onPurchaseDecision) onPurchaseDecision(finalized);
-            if (purchaseWindow) purchaseWindow.close();
             return;
           }
 
@@ -269,9 +282,9 @@ export async function renderAd(container, ad, options = {}) {
 
         if (onPurchaseDecision) onPurchaseDecision(finalized);
 
-        if (purchaseWindow) {
-          purchaseWindow.location.href = ad.link;
-        } else {
+        // Try opening in new tab, fallback to same tab
+        const purchaseWindow = window.open(ad.link, "_blank", "noopener,noreferrer");
+        if (!purchaseWindow) {
           window.location.assign(ad.link);
         }
 
@@ -283,7 +296,6 @@ export async function renderAd(container, ad, options = {}) {
         ctaEl.textContent = originalLabel;
         ctaEl.style.pointerEvents = "auto";
         ctaEl.style.opacity = "1";
-        if (purchaseWindow) purchaseWindow.close();
         if (onPurchaseDecision) onPurchaseDecision({ status: "error", error: err.message });
       }
     });
