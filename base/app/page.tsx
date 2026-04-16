@@ -66,8 +66,8 @@ export default function Home() {
       
       const contractAddress = process.env.NEXT_PUBLIC_EAX_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000";
       if (contractAddress === "0x0000000000000000000000000000000000000000") {
-          setStatus("Error: NEXT_PUBLIC_EAX_CONTRACT_ADDRESS is not set inside your .env.local file.");
-          return;
+        setStatus("Error: NEXT_PUBLIC_EAX_CONTRACT_ADDRESS is not set inside your .env.local file.");
+        return;
       }
 
       const contract = new ethers.Contract(contractAddress, EAXJson.abi, signer);
@@ -131,7 +131,7 @@ export default function Home() {
             await new Promise(r => setTimeout(r, 5000));
             continue;
           }
-          throw err; // Non-428 error or final attempt
+          throw err;
         }
       }
 
@@ -164,8 +164,8 @@ export default function Home() {
       setStatus(`Ad assigned! Advertiser #${winnerIndex} | ${quality}% match quality. Visit /demo to see your ad and earn ATTN.`);
 
     } catch (e: any) {
-        setStatus("Encryption/Transaction Error: " + (e.reason || e.message));
-        console.error(e);
+      setStatus("Encryption/Transaction Error: " + (e.reason || e.message));
+      console.error(e);
     }
   };
 
@@ -244,7 +244,7 @@ export default function Home() {
                 </div>
               )}
               <a href="/demo" className="mt-4 text-sm text-cyan-400 hover:text-cyan-300 underline underline-offset-4 transition-colors">
-                View your ad & earn ATTN →
+                View your ad &amp; earn ATTN →
               </a>
             </div>
           )}
@@ -261,10 +261,10 @@ export default function Home() {
       
       <div className="absolute top-6 right-6 z-50 flex gap-3">
         <a href="/demo" className="text-zinc-500 hover:text-cyan-400 transition-colors text-sm font-medium border border-zinc-700/50 rounded-lg px-4 py-2 hover:bg-zinc-800">
-            Publisher Demo →
+          Publisher Demo →
         </a>
         <a href="/advertiser" className="text-zinc-500 hover:text-emerald-400 transition-colors text-sm font-medium border border-zinc-700/50 rounded-lg px-4 py-2 hover:bg-zinc-800">
-            Advertiser Portal →
+          Advertiser Portal →
         </a>
       </div>
 

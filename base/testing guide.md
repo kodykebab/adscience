@@ -20,9 +20,9 @@ export PRIVATE_KEY="your_private_key"
 forge script script/Deploy.s.sol:DeployScript --rpc-url https://ethereum-sepolia-rpc.publicnode.com --broadcast
 ```
 
-Copy the deployed `EAX` contract address.
+Copy the deployed `EAX` contract address **and** the `MockERC20` contract address from the terminal output.
 
-> **Note**: The deploy no longer calls `initializeAdvertisers()`. The contract starts with zero advertisers — register them via the portal in Step 6A.
+> **Note**: The deploy no longer calls `initializeAdvertisers()`. The contract starts with zero advertisers — register them dynamically via the advertiser portal in Step 6A.
 
 ---
 
@@ -31,7 +31,8 @@ Copy the deployed `EAX` contract address.
 Create `base/.env.local`:
 
 ```
-NEXT_PUBLIC_EAX_CONTRACT_ADDRESS="<YOUR_DEPLOYED_CONTRACT_ADDRESS>"
+NEXT_PUBLIC_EAX_CONTRACT_ADDRESS="<YOUR_DEPLOYED_EAX_ADDRESS>"
+NEXT_PUBLIC_ATTN_TOKEN_ADDRESS="<YOUR_DEPLOYED_MOCKERC20_ADDRESS>"
 NEXT_PUBLIC_BACKEND_URL="http://localhost:4000"
 ```
 
@@ -45,7 +46,7 @@ npm install
 node server.js
 ```
 
-You should see the EAX Ad Server banner on port 4000.
+You should see the EAX Analytics Backend banner on port 4000.
 
 ---
 
@@ -74,33 +75,36 @@ Keep `http://localhost:3000` open.
 ### Phase A — Register an Advertiser + Ad Creative
 
 1. Go to `http://localhost:3000/advertiser`
-2. Set **weighted targeting** per category using the sliders (0–100):
+2. **Important**: Click **Faucet: Get 10,000 Test ATTN** to mint test tokens to your wallet.
+3. Set **weighted targeting** per category using the sliders (0–100):
    - e.g., CRYPTO: 80, AI: 30, FINANCE: 0, GAMING: 0, DEV: 0
    - Higher weight = stronger targeting for that interest
-3. Set bid (e.g., `15` ATTN) — this is the **maximum payout** for a perfect match
-4. Fill in ad creative:
+4. Set **Max Bid** (e.g., `15` ATTN) — this is the **maximum payout** for a perfect match.
+   Score-proportional formula: `payout = bid × (matchScore / maxScore)`
+5. Set **Total Budget** (e.g., `500` ATTN) — locked up-front to fund bids.
+6. Fill in ad creative:
    - **Title**: "Trade Crypto Securely"
    - **Image URL**: (optional)
    - **CTA**: "Start Trading"
    - **Link**: "https://example.com"
-5. Click **Register Weighted Target + Ad Creative**
-6. Confirm the on-chain tx in Metamask
-7. The portal will:
-   - Register weighted targeting vector + bid on-chain
-   - Upload ad creative to the backend (POST /registerAd)
+7. Click **Register Weighted Target + Ad Creative**
+8. Confirm **two** on-chain txs in Metamask:
+   - Tx 1: ERC20 `approve` for your budget
+   - Tx 2: `registerAdvertiser(vector, bid, budget)` — locks budget on-chain
+9. The portal uploads the ad creative to the backend (POST /registerAd)
 
 ### Phase B — Run Encrypted Match
 
 1. Browse some websites to populate `chrome.history`
 2. Go to `http://localhost:3000`
 3. Click the extension icon → **Start Analysis**
-4. The extension classifies your history locally → generates **weighted interest scores** (0–100 per category) → sends to the page
+4. The extension runs local WebAssembly ML → generates **weighted interest scores** (0–100 per category) via zero-shot classification → sends to the page
 5. Click **Encrypt & Match My Attention**
 6. The flow:
    - CoFHE ZK proof encrypts your weighted intent vector
    - `matchIntent()` tx runs FHE weighted dot products on-chain
    - Threshold network decrypts **both** the winner index and match score
-   - `revealMatch()` assigns `activeAdvertiser[you] = winnerId` with score data
+   - `revealMatch()` assigns `activeAdvertiser[you] = winnerId` + stores score data
 7. You'll see: "Ad assigned! Advertiser #X | Y% match quality"
 
 ### Phase C — View Ad & Earn (Cross-Site, Score-Proportional)
@@ -109,13 +113,14 @@ Keep `http://localhost:3000` open.
 2. The page reads `activeAdvertiser[you]`, `matchScore[you]`, and `matchMaxScore[you]` from the contract
 3. Displays the matched ad along with a **Match Quality Analysis** panel showing:
    - Dot product score vs max possible score
-   - Match quality percentage
+   - Match quality percentage ring
    - Estimated payout (computed from the formula below)
+   - Advertiser's target weight vector
 4. Click **Confirm Impression → Earn ATTN**
 5. `recordImpression()` executes on-chain:
    - Verifies your active match
    - Computes score-proportional payout: `payout = bid × (matchScore / maxScore)`
-   - Transfers the scaled payout to your wallet
+   - Deducts from advertiser's locked balance and transfers to your wallet
    - Resets your state (one payout per match)
 
 ---
@@ -173,7 +178,7 @@ await initEAX({
 
 const ad = await getAd();
 await renderAd(document.getElementById("ad-slot"), ad);
-// Payout is now score-proportional: bid × (matchScore / maxScore)
+// Payout is score-proportional: bid × (matchScore / maxScore)
 ```
 
 ## Troubleshooting
@@ -185,5 +190,6 @@ await renderAd(document.getElementById("ad-slot"), ad);
 | "No active match" | Run a match on the main page first |
 | Metamask wrong network | Switch to Ethereum Sepolia (11155111) |
 | Contract reverts | Redeploy after contract changes with `forge script` |
-| Deploy timeout | The new contract uses lazy FHE init — no FHE calls in constructor |
+| Deploy timeout | The contract uses lazy FHE init — no FHE calls in constructor |
 | No advertisers after deploy | Register advertisers via `/advertiser` portal (no longer hardcoded) |
+| Budget exhausted | Deposit more funds via `depositFunds()` or re-register with a new budget |

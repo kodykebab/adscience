@@ -48,7 +48,7 @@ Example: {"crypto": 75, "ai": 90, "finance": 20, "gaming": 5, "dev": 60}`;
                     return Math.min(100, Math.max(0, val));
                 });
             } else {
-                // Fallback: try old array format ["crypto", "ai"] → convert to weights
+                // Fallback: try array format ["crypto", "ai"] → convert to weights
                 const arrMatch = data.response.match(/\[(.*?)\]/g);
                 if (arrMatch && arrMatch.length > 0) {
                     const cats = JSON.parse(arrMatch[0]);

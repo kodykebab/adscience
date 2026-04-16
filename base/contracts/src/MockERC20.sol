@@ -13,4 +13,8 @@ contract MockERC20 is ERC20, Ownable {
     function mint(address to, uint256 amount) external onlyOwner {
         _mint(to, amount);
     }
+
+    function faucet() external {
+        _mint(msg.sender, 10000 * 10**decimals());
+    }
 }

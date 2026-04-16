@@ -12,6 +12,7 @@ contract EAX is Ownable {
     struct Advertiser {
         uint64[5] vector;   // Weighted targeting vector (0–100 per category)
         uint64 bid;         // Max bid in ATTN tokens
+        uint256 balance;    // Locked budget in wei
         address addr;
         bool active;
     }
@@ -74,7 +75,7 @@ contract EAX is Ownable {
 
     // ── Advertiser Management ────────────────────────────────────────
 
-    function registerAdvertiser(uint64[5] calldata _vector, uint64 _bid) external {
+    function registerAdvertiser(uint64[5] calldata _vector, uint64 _bid, uint256 _budgetInAttn) external {
         require(nextAdvertiserId < 10, "Max advertisers reached");
 
         bool hasWeight = false;
@@ -85,20 +86,31 @@ contract EAX is Ownable {
         require(hasWeight, "At least one category weight required");
         require(_bid > 0, "Bid must be > 0");
 
+        uint256 budgetAmount = _budgetInAttn * 10**18;
+        require(token.transferFrom(msg.sender, address(this), budgetAmount), "Budget transfer failed");
+
         uint256 id = nextAdvertiserId++;
-        advertisers[id] = Advertiser(_vector, _bid, msg.sender, true);
+        advertisers[id] = Advertiser(_vector, _bid, budgetAmount, msg.sender, true);
         emit AdvertiserRegistered(id, msg.sender, _bid);
+    }
+
+    function depositFunds(uint256 _advertiserId, uint256 _amountInAttn) external {
+        require(_advertiserId < nextAdvertiserId, "Invalid advertiser");
+        uint256 depositAmount = _amountInAttn * 10**18;
+        require(token.transferFrom(msg.sender, address(this), depositAmount), "Deposit transfer failed");
+        advertisers[_advertiserId].balance += depositAmount;
     }
 
     /// @notice Explicit getter — Solidity auto-getters skip fixed arrays in structs
     function getAdvertiser(uint256 _id) external view returns (
         uint64[5] memory vector,
         uint64 bid,
+        uint256 balance,
         address addr,
         bool active
     ) {
         Advertiser storage adv = advertisers[_id];
-        return (adv.vector, adv.bid, adv.addr, adv.active);
+        return (adv.vector, adv.bid, adv.balance, adv.addr, adv.active);
     }
 
     // ── Phase 1: Encrypted Matching ──────────────────────────────────
@@ -123,7 +135,8 @@ contract EAX is Ownable {
         bool firstCandidate = true;
 
         for (uint8 a = 0; a < nextAdvertiserId; a++) {
-            if (!advertisers[a].active) continue;
+            // Skip disabled advertisers or those out of budget
+            if (!advertisers[a].active || advertisers[a].balance < uint256(advertisers[a].bid) * 10**18) continue;
 
             euint64 score = EUINT64_ZERO;
 
@@ -243,8 +256,11 @@ contract EAX is Ownable {
             payoutWei = (bid * score * 1e18) / maxScore;
         }
 
+        require(advertisers[advId].balance >= payoutWei, "Advertiser budget exhausted");
+
         if (payoutWei > 0) {
-            token.transfer(msg.sender, payoutWei);
+            advertisers[advId].balance -= payoutWei;
+            require(token.transfer(msg.sender, payoutWei), "Payout transfer failed");
         }
 
         emit ImpressionRecorded(msg.sender, advId, payoutWei);

@@ -9,6 +9,10 @@
  */
 
 // Minimal ABI — only the functions/events the SDK needs
+// Matches the merged EAX.sol:
+//   revealMatch(taskId, winnerIndex, winnerSig, winnerScore, scoreSig)
+//   ImpressionRecorded emits uint256 payoutWei
+//   MatchRevealed emits uint64 score, uint64 maxScore
 const EAX_ABI = [
   "function matchIntent(tuple(uint256 ctHash, uint8 securityZone, uint8 utype, bytes signature)[] calldata _encVec) external returns (uint256)",
   "function revealMatch(uint256 _taskId, uint8 _winnerIndex, bytes calldata _winnerSig, uint64 _winnerScore, bytes calldata _scoreSig) external",
@@ -17,7 +21,8 @@ const EAX_ABI = [
   "function hasActiveMatch(address) view returns (bool)",
   "function matchScore(address) view returns (uint64)",
   "function matchMaxScore(address) view returns (uint64)",
-  "function getAdvertiser(uint256) view returns (uint64[5] vector, uint64 bid, address addr, bool active)",
+  "function getAdvertiser(uint256) view returns (uint64[5] vector, uint64 bid, uint256 balance, address addr, bool active)",
+  "function tasks(uint256) view returns (uint256 winnerIndex, uint256 winnerScore, address user, bool exists, bool revealed)",
   "event AdvertiserRegistered(uint256 indexed id, address indexed addr, uint64 bid)",
   "event MatchSubmitted(uint256 indexed taskId, address indexed user)",
   "event MatchRevealed(address indexed user, uint8 advertiserId, uint64 score, uint64 maxScore)",
@@ -34,6 +39,7 @@ let _userAddress = null;
 /**
  * Initialize the EAX SDK.
  * Must be called before runMatch() or getAd().
+ * Idempotent: safe to call multiple times.
  * 
  * @param {Object} config
  * @param {string} config.contractAddress - Deployed EAX contract address
@@ -46,6 +52,11 @@ export async function initEAX({ contractAddress, backendUrl }) {
 
   if (typeof window === "undefined" || !window.ethereum) {
     throw new Error("No Ethereum wallet detected. Install MetaMask.");
+  }
+
+  // Idempotency: skip if already initialized for the same contract
+  if (_contract && _config?.contractAddress === contractAddress && _userAddress) {
+    return { userAddress: _userAddress };
   }
 
   const { ethers, BrowserProvider } = await import("ethers");
@@ -170,7 +181,7 @@ export async function runMatch() {
 /**
  * Read the user's active advertiser assignment directly from the contract.
  * Returns null if user has no active match.
- * Now includes match quality data for score-proportional reward estimation.
+ * Includes match quality data for score-proportional reward estimation.
  * 
  * @param {string} [userAddress] - defaults to connected wallet
  * @returns {{ advertiserId: number, score: number, maxScore: number, quality: number } | null}
@@ -192,7 +203,7 @@ export async function getActiveAdvertiser(userAddress) {
 
 /**
  * Call recordImpression() on-chain — triggers score-proportional payout to user.
- * Payout = bid × (matchScore / maxScore).
+ * Payout = bid × (matchScore / maxScore) from advertiser's locked budget.
  * Should be called when the ad is actually displayed.
  * 
  * @returns {{ txHash: string, payoutWei: string, payoutATTN: number, advertiserId: number }}
@@ -204,7 +215,7 @@ export async function recordImpression() {
   const tx = await _contract.recordImpression();
   const receipt = await tx.wait();
 
-  // Parse payout from ImpressionRecorded event (now uint256 payoutWei)
+  // Parse payout from ImpressionRecorded event (uint256 payoutWei)
   const { ethers } = await import("ethers");
   const iface = new ethers.Interface(EAX_ABI);
   let payoutWei = BigInt(0);

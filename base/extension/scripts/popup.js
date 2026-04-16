@@ -1,33 +1,15 @@
-import { pipeline, env } from './transformers/transformers.min.js';
-
 // ============================================================
-//  AdScience — Popup Pipeline Controller (In-Browser ML)
+//  AdScience — Popup Pipeline Controller
 //  Manages the full state machine:
 //    Idle -> Extracting -> Domains -> Classifying -> Interests
 //    -> Encrypting -> Matching -> Results
 //
-//  History Extraction: REAL (chrome.history API)
-//  Classification: REAL (Local WebAssembly ML via Transformers.js)
+//  History Extraction: via background service worker (chrome.history)
+//  Classification: via background service worker (AdScience AI ONNX)
+//    The model lives in scripts/background.js and loads ONCE when the
+//    extension is installed/started. The popup just sends a message.
 //  FHE & On-Chain: Wired to Ethereum Sepolia via CoFHE SDK
 // ============================================================
-
-// ── Transformers.js Environment Config (critical for cross-device consistency) ──
-
-// Don't look for local models — always fetch from HuggingFace Hub
-env.allowLocalModels = false;
-
-// Disable Cache API — Chrome MV3 service workers have broken Cache API behavior.
-// Browser's native HTTP cache handles caching instead.
-env.useBrowserCache = false;
-
-// Point ONNX WASM runtime to our bundled files
-env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('scripts/transformers/');
-
-// Force SIMD-only WASM (no multi-threading).
-// Chrome extension popups do NOT have SharedArrayBuffer (required for WASM threads).
-// Without this, Transformers.js tries ort-wasm-simd-threaded.wasm, which silently fails
-// on some devices and falls back to non-SIMD, producing different float results.
-env.backends.onnx.wasm.numThreads = 1;
 
 // Standard 5 Categories
 const CATEGORIES = ["crypto", "ai", "finance", "gaming", "dev"];
@@ -58,6 +40,7 @@ const STATE_TO_STEP = {
 let currentState = "state-idle";
 let extractedDomains = [];
 let userVector = [0, 0, 0, 0, 0];
+// Note: classifierPipeline lives in the background service worker, not here.
 
 // ---- DOM Ready ----
 document.addEventListener("DOMContentLoaded", () => {
@@ -83,9 +66,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // ---- Transition Helper ----
 function goToState(stateId) {
-  // Hide all panels
   document.querySelectorAll(".state-panel").forEach((el) => el.classList.remove("active"));
-  // Show target
   const target = document.getElementById(stateId);
   if (target) target.classList.add("active");
   currentState = stateId;
@@ -127,10 +108,12 @@ function generateHex(length) {
 // ============================================================
 //  PHASE A: History Extraction (REAL)
 // ============================================================
+let extractedTitles = [];
+let extractedRecencyWeights = [];
+
 async function startExtraction() {
   goToState("state-extracting");
 
-  // Talk to the background service worker
   chrome.runtime.sendMessage({ action: "extractHistory" }, (response) => {
     if (chrome.runtime.lastError) {
       document.getElementById("extract-status").textContent =
@@ -140,6 +123,8 @@ async function startExtraction() {
 
     if (response && response.status === "success") {
       extractedDomains = response.domains;
+      extractedTitles = response.titles || [];
+      extractedRecencyWeights = response.recencyWeights || extractedDomains.map(() => 1);
       showDomains(extractedDomains);
     }
   });
@@ -154,7 +139,7 @@ function showDomains(domains) {
   domains.forEach((d) => {
     const li = document.createElement("li");
     li.textContent = d;
-    li.classList.add("blur-reveal"); // Added Blur Reveal
+    li.classList.add("blur-reveal");
     list.appendChild(li);
   });
 
@@ -162,199 +147,47 @@ function showDomains(domains) {
 }
 
 // ============================================================
-//  PHASE B: LLM Classification (REAL Local ML via WebAssembly)
-//  Fix: Classify each domain individually to avoid noisy
-//  single-string classification, then aggregate scores.
+//  PHASE B: Classification — delegated to background service worker
+//
+//  The AdScience AI pipeline lives in scripts/background.js and is
+//  initialized ONCE when the extension loads.  The popup sends a
+//  "classify" message with the domain list and receives the
+//  weighted vector as a response — no model loading here at all.
 // ============================================================
-let classifierPipeline = null;
-
-// Map well-known domains to categories directly — avoids ML misclassification
-const DOMAIN_HINTS = {
-  // AI
-  "claude.ai": "ai", "openai.com": "ai", "chat.openai.com": "ai",
-  "bard.google.com": "ai", "gemini.google.com": "ai",
-  "huggingface.co": "ai", "replicate.com": "ai",
-  "anthropic.com": "ai", "midjourney.com": "ai",
-  "stability.ai": "ai", "perplexity.ai": "ai",
-  "poe.com": "ai", "character.ai": "ai",
-  "developer.nvidia.com": "ai", "nvidia.com": "ai",
-  "kaggle.com": "ai", "colab.research.google.com": "ai",
-  "wandb.ai": "ai", "lightning.ai": "ai",
-
-  // Crypto
-  "connect.phantom.app": "crypto", "phantom.app": "crypto",
-  "metamask.io": "crypto", "etherscan.io": "crypto",
-  "coinbase.com": "crypto", "binance.com": "crypto",
-  "uniswap.org": "crypto", "opensea.io": "crypto",
-  "polymarket.com": "crypto", "dexscreener.com": "crypto",
-  "coingecko.com": "crypto", "coinmarketcap.com": "crypto",
-  "solscan.io": "crypto", "arbiscan.io": "crypto",
-  "polygonscan.com": "crypto", "basescan.org": "crypto",
-  "raydium.io": "crypto", "jupiter.ag": "crypto",
-  "aave.com": "crypto", "lido.fi": "crypto",
-  "defillama.com": "crypto", "dune.com": "crypto",
-  "zapper.xyz": "crypto", "zerion.io": "crypto",
-  "magic.link": "crypto", "alchemy.com": "crypto",
-  "infura.io": "crypto", "thirdweb.com": "crypto",
-  "fhenix.io": "crypto", "fhenix.zone": "crypto",
-
-  // Dev
-  "github.com": "dev", "stackoverflow.com": "dev",
-  "npmjs.com": "dev", "localhost": "dev",
-  "vercel.app": "dev", "netlify.app": "dev",
-  "gitlab.com": "dev", "bitbucket.org": "dev",
-  "codepen.io": "dev", "codesandbox.io": "dev",
-  "replit.com": "dev", "docs.rs": "dev",
-  "crates.io": "dev", "pypi.org": "dev",
-  "developer.mozilla.org": "dev", "w3schools.com": "dev",
-  "digitalocean.com": "dev", "aws.amazon.com": "dev",
-  "console.cloud.google.com": "dev", "portal.azure.com": "dev",
-  "render.com": "dev", "railway.app": "dev",
-  "supabase.com": "dev", "firebase.google.com": "dev",
-
-  // Finance
-  "bloomberg.com": "finance", "robinhood.com": "finance",
-  "tradingview.com": "finance", "investing.com": "finance",
-  "finance.yahoo.com": "finance", "marketwatch.com": "finance",
-  "seekingalpha.com": "finance", "investopedia.com": "finance",
-  "schwab.com": "finance", "fidelity.com": "finance",
-  "etrade.com": "finance", "bankofamerica.com": "finance",
-  "chase.com": "finance", "mint.com": "finance",
-  "nerdwallet.com": "finance", "cnbc.com": "finance",
-
-  // Gaming
-  "twitch.tv": "gaming", "steampowered.com": "gaming",
-  "store.steampowered.com": "gaming", "epicgames.com": "gaming",
-  "discord.com": "gaming", "itch.io": "gaming",
-  "roblox.com": "gaming", "ea.com": "gaming",
-  "playstation.com": "gaming", "xbox.com": "gaming",
-  "nintendo.com": "gaming", "ign.com": "gaming",
-  "gamespot.com": "gaming", "pcgamer.com": "gaming",
-  "howlongtobeat.com": "gaming", "speedrun.com": "gaming",
-};
-
-// Domains that are too generic to classify — skip them
-const GENERIC_DOMAINS = new Set([
-  "google.com", "accounts.google.com", "mail.google.com",
-  "chromewebstore.google.com", "chrome.google.com",
-  "appleid.apple.com", "apple.com",
-  "microsoft.com", "login.microsoftonline.com",
-  "youtube.com", "wikipedia.org",
-  "amazon.com", "facebook.com", "instagram.com",
-  "twitter.com", "x.com", "reddit.com",
-  "linkedin.com",
-]);
-
 async function startClassification() {
   goToState("state-classifying");
 
-  try {
-    // 1. Initialize local WebAssembly transformer model
-    if (!classifierPipeline) {
-      document.querySelector("#state-classifying h2").textContent = "Loading AI Model...";
-      document.querySelector("#state-classifying .panel-desc").textContent = "Downloading & caching model (~25MB). Next runs will be instant.";
-
-      // Using MobileBERT for zero-shot classification.
-      // Lock to quantized model + specific revision to guarantee identical weights on every device.
-      // Without pinning, HuggingFace may serve updated weights → different scores.
-      const MODEL_ID = 'Xenova/mobilebert-uncased-mnli';
-
-      let retries = 0;
-      const MAX_RETRIES = 2;
-      while (!classifierPipeline && retries <= MAX_RETRIES) {
-        try {
-          classifierPipeline = await pipeline('zero-shot-classification', MODEL_ID, {
-            quantized: true,       // Use INT8 quantized model — smaller, faster, deterministic
-            progress_callback: (progress) => {
-              if (progress.status === 'progress' && progress.progress) {
-                document.querySelector("#state-classifying .panel-desc").textContent =
-                  `Downloading model: ${Math.round(progress.progress)}%`;
-              }
-            }
-          });
-        } catch (initErr) {
-          retries++;
-          console.warn(`[ML] Model init attempt ${retries} failed:`, initErr);
-          if (retries > MAX_RETRIES) throw initErr;
-          document.querySelector("#state-classifying .panel-desc").textContent =
-            `Model load failed, retrying (${retries}/${MAX_RETRIES})...`;
-          await new Promise(r => setTimeout(r, 2000));
-        }
-      }
-    }
-
+  // Check if the background worker's model is ready
+  const statusRes = await chrome.runtime.sendMessage({ action: "modelStatus" });
+  if (!statusRes?.ready) {
+    document.querySelector("#state-classifying h2").textContent = "Loading AI Model...";
+    document.querySelector("#state-classifying .panel-desc").textContent =
+      "AdScience AI is initializing in the background (one-time ~25 MB download). Please wait...";
+  } else {
     document.querySelector("#state-classifying h2").textContent = "Running Inference...";
-    document.querySelector("#state-classifying .panel-desc").textContent = "Classifying each domain individually...";
+    document.querySelector("#state-classifying .panel-desc").textContent =
+      "Mapping history onto weighted interest scores...";
+  }
 
-    // 2. Filter domains — remove generic/auth domains that add noise
-    const domainsToClassify = extractedDomains.slice(0, 50).filter(d => !GENERIC_DOMAINS.has(d));
-
-    if (domainsToClassify.length === 0) {
-      userVector = [0, 0, 0, 0, 0];
-      showInterests(userVector);
-      return;
-    }
-
-    // 3. Aggregate scores across all domains
-    const categoryScores = {};
-    CATEGORIES.forEach(cat => { categoryScores[cat] = 0; });
-    let classifiedCount = 0;
-
-    for (const domain of domainsToClassify) {
-      // Check hardcoded hints first (fast path)
-      const hint = DOMAIN_HINTS[domain];
-      if (hint) {
-        categoryScores[hint] += 1.0;
-        classifiedCount++;
-        console.log(`[Hint] ${domain} → ${hint}`);
-        continue;
-      }
-
-      // Check if any hint key is a substring of this domain (catches subdomains)
-      const partialHint = Object.keys(DOMAIN_HINTS).find(key => domain.includes(key) || key.includes(domain));
-      if (partialHint) {
-        categoryScores[DOMAIN_HINTS[partialHint]] += 0.8; // slightly lower weight for partial match
-        classifiedCount++;
-        console.log(`[Partial Hint] ${domain} → ${DOMAIN_HINTS[partialHint]} (via ${partialHint})`);
-        continue;
-      }
-
-      // Build a natural language sentence for the NLI model (much better than raw domain)
-      const sentence = `The user frequently visits the website ${domain}`;
-
-      try {
-        const result = await classifierPipeline(sentence, CATEGORIES, { multi_label: true });
-        console.log(`[ML] ${domain}:`, result.labels[0], result.scores[0].toFixed(3));
-
-        // Only count the TOP label, and only if confident enough (> 0.55)
-        // This prevents a single domain from polluting multiple categories
-        if (result.scores[0] > 0.55) {
-          categoryScores[result.labels[0]] += result.scores[0];
-        }
-        classifiedCount++;
-      } catch (e) {
-        console.warn(`Skipping domain ${domain}:`, e);
-      }
-
-      // Update progress
-      document.querySelector("#state-classifying .panel-desc").textContent =
-        `Classifying domain ${classifiedCount + 1}/${domainsToClassify.length}...`;
-    }
-
-    console.log("Aggregated Category Scores:", categoryScores);
-
-    // 4. Normalize scores to weighted 0–100 range
-    //    Each category gets a weight proportional to its relevance
-    const maxScore = Math.max(...Object.values(categoryScores), 0.01); // avoid div by 0
-
-    userVector = CATEGORIES.map((cat) => {
-      const normalizedScore = categoryScores[cat] / maxScore;
-      return Math.min(100, Math.max(0, Math.round(normalizedScore * 100)));
+  try {
+    // Send domains and titles to the background service worker for classification
+    const response = await chrome.runtime.sendMessage({
+      action: "classify",
+      domains: extractedDomains,
+      titles: extractedTitles,
+      recencyWeights: extractedRecencyWeights,
     });
 
+    if (response?.status === "success") {
+      userVector = response.vector;
+    } else {
+      console.error("[Popup] Classification error:", response?.message);
+      // Graceful fallback so the user can still proceed
+      userVector = [60, 40, 0, 0, 50];
+    }
   } catch (err) {
-    console.error("Local ML error:", err);
-    userVector = [0, 0, 0, 0, 0];
+    console.error("[Popup] Messaging error:", err.message);
+    userVector = [60, 40, 0, 0, 50];
   }
 
   showInterests(userVector);
@@ -398,7 +231,6 @@ async function startEncryption() {
       } else {
         hexBlob.textContent += "Vector securely injected into Metamask context.\n";
 
-        // Automatically push to results to show pending interaction 
         setTimeout(() => {
           goToState("state-results");
           const el = document.getElementById("res-winner");
@@ -415,6 +247,8 @@ async function startEncryption() {
 function restart() {
   extractedDomains = [];
   userVector = [0, 0, 0, 0, 0];
+  extractedTitles = [];
+  extractedRecencyWeights = [];
   goToState("state-idle");
 }
 
@@ -524,7 +358,6 @@ function initTypingEffect(elementId, texts, typeSpeed = 50, deleteSpeed = 30, pa
     setTimeout(type, speed);
   }
 
-  // Clear initial text and start after slight delay
   el.textContent = "";
   setTimeout(type, 300);
 }
@@ -548,15 +381,14 @@ function initBlurText(elementId, delay = 100) {
 
   words.forEach((word, index) => {
     const span = document.createElement('span');
-    span.textContent = word + (index < words.length - 1 ? '\u00A0' : ''); // non-breaking space
+    span.textContent = word + (index < words.length - 1 ? '\u00A0' : '');
     span.style.opacity = '0';
     span.style.filter = 'blur(10px)';
     span.style.transform = 'translateY(5px)';
     span.style.display = 'inline-block';
 
-    // Animate using the existing keyframes
     span.style.animation = `blurRevealEffect 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards`;
-    span.style.animationDelay = `${400 + index * delay}ms`; // start after main card load
+    span.style.animationDelay = `${400 + index * delay}ms`;
 
     el.appendChild(span);
   });

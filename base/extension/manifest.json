@@ -12,7 +12,8 @@
   },
   "permissions": [
     "history",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "https://*.trycloudflare.com/*",

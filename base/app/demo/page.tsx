@@ -57,7 +57,7 @@ export default function PublisherDemo() {
 
       // Read advertiser data for bid and vector using explicit getter
       const advData = await contract.getAdvertiser(advId);
-      // getAdvertiser returns: (uint64[5] vector, uint64 bid, address addr, bool active)
+      // getAdvertiser returns: (uint64[5] vector, uint64 bid, uint256 balance, address addr, bool active)
       const advVector = Array.from({ length: 5 }, (_, i) => Number(advData[0][i]));
       const bid = Number(advData[1]);
       const estimatedPayout = maxScore > 0 ? (bid * score / maxScore) : 0;
@@ -96,7 +96,7 @@ export default function PublisherDemo() {
       setStatus("Recording impression on-chain...");
       const receipt = await tx.wait();
 
-      // Parse ImpressionRecorded event
+      // Parse ImpressionRecorded event — uint256 payoutWei
       const iface = new ethers.Interface(EAXJson.abi);
       let payoutWei = BigInt(0);
       let advId = 0;
@@ -152,7 +152,7 @@ export default function PublisherDemo() {
 
 await initEAX({ contractAddress, backendUrl });
 const ad = await getAd();     // reads chain + fetches creative
-await renderAd(slot, ad);     // renders + triggers payout`}</code></pre>
+await renderAd(slot, ad);     // renders + triggers score-proportional payout`}</code></pre>
         </div>
 
         {/* Status */}
