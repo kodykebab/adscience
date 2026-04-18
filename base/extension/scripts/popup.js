@@ -1,20 +1,9 @@
-// ============================================================
-//  AdScience — Popup Pipeline Controller
-//  Manages the full state machine:
-//    Idle -> Extracting -> Domains -> Classifying -> Interests
-//    -> Encrypting -> Matching -> Results
-//
-//  History Extraction: via background service worker (chrome.history)
-//  Classification: via background service worker (AdScience AI ONNX)
-//    The model lives in scripts/background.js and loads ONCE when the
-//    extension is installed/started. The popup just sends a message.
-//  FHE & On-Chain: Wired to Ethereum Sepolia via CoFHE SDK
-// ============================================================
+// Popup controller for extraction, classification, and DApp bridging.
 
 // Standard 5 Categories
 const CATEGORIES = ["crypto", "ai", "finance", "gaming", "dev"];
 
-// ---- State Machine ----
+// State machine configuration
 const STATES = [
   "state-idle",
   "state-extracting",
@@ -42,7 +31,7 @@ let extractedDomains = [];
 let userVector = [0, 0, 0, 0, 0];
 // Note: classifierPipeline lives in the background service worker, not here.
 
-// ---- DOM Ready ----
+// DOM Events
 document.addEventListener("DOMContentLoaded", () => {
   // Buttons
   document.getElementById("btn-extract").addEventListener("click", startExtraction);
@@ -62,9 +51,31 @@ document.addEventListener("DOMContentLoaded", () => {
     "FHE Enabled Bidding"
   ];
   initTypingEffect("header-subtitle", typingTexts, 60, 40, 2000);
+  
+  pollModelStatus();
 });
 
-// ---- Transition Helper ----
+async function pollModelStatus() {
+  const banner = document.getElementById('model-loading-banner');
+  const check = async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({ action: 'modelStatus' });
+      if (res?.ready) {
+        banner.classList.add('hidden');
+        return;
+      }
+      banner.classList.remove('hidden');
+      if (res?.progress) {
+        document.getElementById('model-progress').textContent = `Downloading (${res.progress}%)`;
+        document.getElementById('model-progress-fill').style.width = `${res.progress}%`;
+      }
+    } catch(e) {}
+    setTimeout(check, 1000);
+  };
+  check();
+}
+
+// UI state transitions
 function goToState(stateId) {
   document.querySelectorAll(".state-panel").forEach((el) => el.classList.remove("active"));
   const target = document.getElementById(stateId);
@@ -91,7 +102,7 @@ function updateStepper(stateId) {
   });
 }
 
-// ---- Utility ----
+// Utility functions
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -105,9 +116,7 @@ function generateHex(length) {
   return hex;
 }
 
-// ============================================================
-//  PHASE A: History Extraction (REAL)
-// ============================================================
+// History extraction
 let extractedTitles = [];
 let extractedRecencyWeights = [];
 
@@ -146,14 +155,7 @@ function showDomains(domains) {
   goToState("state-domains");
 }
 
-// ============================================================
-//  PHASE B: Classification — delegated to background service worker
-//
-//  The AdScience AI pipeline lives in scripts/background.js and is
-//  initialized ONCE when the extension loads.  The popup sends a
-//  "classify" message with the domain list and receives the
-//  weighted vector as a response — no model loading here at all.
-// ============================================================
+// Intent classification logic
 async function startClassification() {
   goToState("state-classifying");
 
@@ -177,6 +179,24 @@ async function startClassification() {
       titles: extractedTitles,
       recencyWeights: extractedRecencyWeights,
     });
+
+    if (response?.status === "processing") {
+      const poll = async () => {
+        try {
+          const res = await chrome.runtime.sendMessage({ action: "classify", domains: [], titles: [] });
+          if (res?.status === "success" && res.vector) {
+            userVector = res.vector;
+            showInterests(userVector);
+          } else {
+            setTimeout(poll, 2000);
+          }
+        } catch(e) {
+            setTimeout(poll, 2000);
+        }
+      };
+      setTimeout(poll, 3000);
+      return;
+    }
 
     if (response?.status === "success") {
       userVector = response.vector;
@@ -213,9 +233,7 @@ function showInterests(vector) {
   goToState("state-interests");
 }
 
-// ============================================================
-//  PHASE C: Bridging Payload to Fhenix DApp
-// ============================================================
+// DApp payload delivery
 async function startEncryption() {
   goToState("state-encrypting");
 
@@ -252,9 +270,7 @@ function restart() {
   goToState("state-idle");
 }
 
-// ============================================================
-//  AESTHETICS (Spotlight, Magnet, Counter, Decrypt)
-// ============================================================
+// Aesthetic effects (spotlight, magnetic, decrypt)
 function initAesthetics() {
   // Spotlight on panels (monochrome white glow via CSS)
   document.addEventListener("mousemove", (e) => {
@@ -324,7 +340,7 @@ function animateCountUp(element, endValue, duration) {
   window.requestAnimationFrame(step);
 }
 
-// ==== Initial Load Effects ====
+// Initial load animations
 function initTypingEffect(elementId, texts, typeSpeed = 50, deleteSpeed = 30, pause = 1500) {
   const el = document.getElementById(elementId);
   if (!el) return;

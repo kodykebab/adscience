@@ -41,6 +41,20 @@
       <div class="step" data-step="4"><span class="step-num">4</span><span class="step-label">Match</span></div>
     </div>
 
+    <!-- Model Loading Banner (shown until model is ready) -->
+    <div id="model-loading-banner" class="model-banner hidden">
+      <div class="model-banner-inner">
+        <div class="model-spinner-small"></div>
+        <div class="model-banner-text">
+          <span class="model-banner-title">Downloading AI Model...</span>
+          <span class="model-banner-progress" id="model-progress">Preparing (0%)</span>
+        </div>
+      </div>
+      <div class="model-progress-bar">
+        <div class="model-progress-fill" id="model-progress-fill"></div>
+      </div>
+    </div>
+
     <!-- ===== MAIN CONTENT: STATE PANELS ===== -->
     <main>
 

@@ -57,31 +57,28 @@ AdScience is a full-stack, end-to-end privacy-preserving advertising protocol. I
 
 ---
 
-### 1. 🧠 ML Engine: Binary → Weighted Classification (Background.js)
+### 1. ML Engine: Metadata Extraction & EMA Logic
 
-**File**: `base/extension/scripts/background.js` — **~414 lines changed**
+**File**: `base/extension/scripts/background.js` and `base/extension/content.js`
 
-This is the **largest and most impactful change**. The entire ML classification pipeline was rewritten.
+The ML classification pipeline uses real-time page content for profiling.
 
 #### What changed:
 
-| Aspect | `main` | `dynnamictrip` |
-|--------|--------|----------------|
-| **ML Model** | `Xenova/mobilebert-uncased-mnli` (zero-shot NLI) | `Sentence-Transformers/all-MiniLM-L6-v2` (sentence embeddings) |
-| **Pipeline** | `zero-shot-classification` (Transformers.js) | `feature-extraction` (sentence embeddings + cosine similarity) |
-| **Output** | Binary vector `[0, 1, 1, 0, 1]` | Weighted vector `[75, 90, 20, 5, 60]` (0–100 per category) |
-| **Input data** | Domain names only | Domain names + page titles + recency weights |
-| **Inference strategy** | Single pass over all domains | Multi-chunk recency-weighted inference (up to 4 passes) |
-| **Normalization** | Threshold-based (`> 0.2 → 1`) | Softmax with temperature parameter (`T=0.1`) |
-| **Crash protection** | Basic try/catch | 500-char truncation to prevent ONNX WASM Error Code 6 |
+| Aspect | History-based | Context-aware |
+|--------|----------------------|-------------------------|
+| **Data source** | Domain-only from `chrome.history` | Page titles and metadata ingested live via `content.js` |
+| **Model** | `Xenova/mobilebert-uncased-mnli` | `Sentence-Transformers/all-MiniLM-L6-v2` |
+| **Output Type** | Binary zero-sum vector | Weighted interest vector |
+| **State Storage** | Recalculated per run | Exponential Moving Average (EMA) in `chrome.storage.local` |
+| **Persistence** | None | **Asymmetric EMA:** (5% growth / 0.5% decay) |
 
-#### Key technical details:
+#### Key Technical Upgrades:
 
-- **Category embeddings are pre-computed at startup**: Each of the 5 categories (crypto, ai, finance, gaming, dev) is expanded into a rich descriptive sentence and embedded once. User browsing chunks are then scored via cosine similarity against these precomputed vectors.
-- **Recency weighting**: History entries are sorted by `lastVisitTime`. An exponential decay function (`halfLifeMs = 7 days`) weights recent visits higher. Chunks are ordered by recency, and each chunk's scores are multiplied by its average recency weight.
-- **Multi-chunk inference**: Titles are split into up to 4 recency-ordered batches. Each chunk is independently embedded and compared, then weighted-averaged into the final vector. This provides more stable results than a single-pass approach.
-- **Softmax normalization**: Raw cosine similarities are passed through a softmax with `T=0.1` to distribute scores across categories, rather than forcing the top category to dominate.
-- **New message API**: The extension now exposes `classify`, `extractHistory`, and `modelStatus` message actions instead of inline classification in `popup.js`.
+- **Metadata Extraction (`content.js`)**: The extension extracts page `<title>` and `<meta name="description">` tags after a short hydration delay. This text is sent to the background worker for embedding generation.
+- **Asymmetric Absolute EMA (Sticky Interests)**: The rolling user vector no longer uses simple percentage allocation (where finding out about AI mathematically crushes your Gaming history down to 0). It uses an asymmetric EMA—a new interest surges aggressively (`alpha = 0.05`), while ignored interests decay stubbornly (`alpha = 0.005`). 
+- **Interest Accumulation**: The profile vector allows for independent scoring across multiple categories simultaneously, rather than a zero-sum fixed distribution.
+- **Bootstrap Fallback**: If `chrome.storage.local` is empty on first install, the core engine smoothly falls back to a 60-domain `chrome.history` sweep, slicing the users most recent history into chunks, to instantly establish a comprehensive day-one profile.
 
 ---
 
@@ -89,7 +86,7 @@ This is the **largest and most impactful change**. The entire ML classification 
 
 **File**: `base/contracts/src/EAX.sol` — **~220 lines changed**
 
-The core on-chain logic was upgraded from binary matching to a full weighted dot-product auction with proportional payouts.
+The core on-chain logic was updated from binary matching to a full weighted dot-product auction with proportional payouts.
 
 #### What changed:
 
@@ -156,7 +153,7 @@ Example:
 #### What changed:
 - **Classification moved to background service worker**: Popup no longer imports `@huggingface/transformers` or runs ML inline. Instead, it sends a `classify` message to `background.js` and receives the weighted vector.
 - **History extraction enhanced**: Now collects page titles and recency weights alongside domains, sends all three arrays to the background worker.
-- **Interest display upgraded**: Categories now show percentage values (e.g., `crypto 75%`) with opacity proportional to score, instead of binary active/inactive tags.
+- **Interest display updated**: Categories now show percentage values (e.g., `crypto 75%`) with opacity proportional to score, instead of binary active/inactive tags.
 - **Vector display**: Shows `[75, 90, 20, 5, 60]` instead of `[0, 1, 1, 0, 1]`.
 - **Graceful fallback**: On classification failure, falls back to `[60, 40, 0, 0, 50]` instead of `[1, 0, 0, 0, 0]`.
 - **Model readiness polling**: New `waitForModel()` function polls `background.js` via `modelStatus` message before starting classification.

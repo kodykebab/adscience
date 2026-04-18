@@ -13,6 +13,7 @@
   "permissions": [
     "history",
     "storage",
+    "offscreen",
     "alarms"
   ],
   "host_permissions": [

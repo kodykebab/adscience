@@ -7,12 +7,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── In-memory stores ─────────────────────────────────────────────
+// In-memory data stores
 const ads = new Map();       // advertiserId → ad creative
 const matches = [];          // { advertiserId, user, txHash, timestamp }
 const impressions = [];      // { advertiserId, user, payoutWei, payoutATTN, txHash, timestamp }
 
-// ── Contract setup ───────────────────────────────────────────────
+// Contract configuration
 const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_EAX_CONTRACT_ADDRESS
   || "0x33786a4bee9587b673e874b8f8a07e11f2d23820";
 const ATTN_ADDRESS = process.env.NEXT_PUBLIC_ATTN_TOKEN_ADDRESS
@@ -36,7 +36,7 @@ let provider;
 let contract;
 let listenersAttached = false;
 
-// ── Historical sync with retry + fallback ────────────────────────
+// Blockchain indexer logic
 async function startIndexer() {
   console.log("[Indexer] Connecting to chain...");
 
@@ -131,7 +131,7 @@ function attachListeners() {
 // Start indexer (non-blocking — server starts even if RPC is slow)
 startIndexer();
 
-// ── Routes ───────────────────────────────────────────────────────
+// API Routes
 
 // GET /analytics?advertiserId=N
 app.get("/analytics", (req, res) => {
@@ -225,7 +225,7 @@ app.get("/ads", (_req, res) => {
   res.json(Array.from(ads.values()));
 });
 
-// ── Start ────────────────────────────────────────────────────────
+// Server initialization
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════╗`);

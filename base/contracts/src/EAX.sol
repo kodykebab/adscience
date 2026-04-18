@@ -7,7 +7,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract EAX is Ownable {
 
-    // ── Structs ──────────────────────────────────────────────────────
+    // Structs
 
     struct Advertiser {
         uint64[5] vector;   // Weighted targeting vector (0–100 per category)
@@ -25,7 +25,7 @@ contract EAX is Ownable {
         bool revealed;
     }
 
-    // ── Storage ──────────────────────────────────────────────────────
+    // Storage
 
     Advertiser[10] public advertisers;
     uint256 public nextAdvertiserId;
@@ -47,23 +47,20 @@ contract EAX is Ownable {
     mapping(address => uint64)  public matchScore;          // decrypted dot-product score
     mapping(address => uint64)  public matchMaxScore;       // max possible score (for normalization)
 
-    // ── Events ───────────────────────────────────────────────────────
+    // Events
 
     event AdvertiserRegistered(uint256 indexed id, address indexed addr, uint64 bid);
     event MatchSubmitted(uint256 indexed taskId, address indexed user);
     event MatchRevealed(address indexed user, uint8 advertiserId, uint64 score, uint64 maxScore);
     event ImpressionRecorded(address indexed user, uint8 advertiserId, uint256 payoutWei);
 
-    // ── Constructor ──────────────────────────────────────────────────
-    // No FHE calls here — prevents deployment timeout on Sepolia CoFHE
+    // Constructor
 
     constructor(address _token) Ownable(msg.sender) {
         token = IERC20(_token);
     }
 
-    // ── Internal: Lazy FHE Init ──────────────────────────────────────
-    // First call to matchIntent() initializes the encrypted zero constants.
-    // This avoids the expensive CoFHE coprocessor calls during contract deployment.
+    // Internal lazy FHE initialization
 
     function _ensureFHEInit() internal {
         if (!_fheInitialized) {
@@ -73,7 +70,7 @@ contract EAX is Ownable {
         }
     }
 
-    // ── Advertiser Management ────────────────────────────────────────
+    // Advertiser registration and funding
 
     function registerAdvertiser(uint64[5] calldata _vector, uint64 _bid, uint256 _budgetInAttn) external {
         require(nextAdvertiserId < 10, "Max advertisers reached");
@@ -113,11 +110,7 @@ contract EAX is Ownable {
         return (adv.vector, adv.bid, adv.balance, adv.addr, adv.active);
     }
 
-    // ── Phase 1: Encrypted Matching ──────────────────────────────────
-    // User submits encrypted interest vector (weighted 0–100 per category).
-    // Contract computes FHE weighted dot products against all advertisers
-    // and selects the winner (highest score × bid).
-    // Both winnerIndex and raw winnerScore are stored encrypted for later decryption.
+    // Phase 1: Local intent matching using FHE dot product
 
     function matchIntent(InEuint64[] calldata _encVec) external returns (uint256) {
         require(_encVec.length == 5, "Vector must be size 5");
@@ -184,10 +177,7 @@ contract EAX is Ownable {
         return taskId;
     }
 
-    // ── Phase 2: Reveal Match ────────────────────────────────────────
-    // User brings decrypted winnerIndex + winnerScore with threshold signatures.
-    // Contract verifies via CoFHE publishDecryptResult, then pre-computes the
-    // score-proportional reward stored for later payout.
+    // Phase 2: Verification and match reveal
 
     function revealMatch(
         uint256 _taskId,
@@ -224,14 +214,7 @@ contract EAX is Ownable {
         emit MatchRevealed(msg.sender, _winnerIndex, _winnerScore, maxPossible);
     }
 
-    // ── Phase 3: Record Impression ───────────────────────────────────
-    // Called by the SDK on ANY website when the winning ad is displayed.
-    //
-    // Payout formula (score-proportional):
-    //   payoutWei = bid × (matchScore / maxScore) × 10^18
-    //
-    // A perfect match (100% quality) pays the full bid.
-    // Partial matches pay proportionally — better relevance = higher reward.
+    // Phase 3: Payout calculation on ad impression
 
     function recordImpression() external {
         require(hasActiveMatch[msg.sender], "No active match");
