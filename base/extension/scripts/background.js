@@ -233,16 +233,16 @@ async function classifyBrowsing(domains, titles, recencyWeights = []) {
   const domainText = domainTokens.slice(0, 30).join(', ');
 
   if (usefulTitleEntries.length > 0) {
-    // Split titles into up to MAX_CHUNKS recency-ordered chunks and weight each chunk by recency.
-    const chunkCount = Math.min(MAX_CHUNKS, Math.max(1, usefulTitleEntries.length));
-    const chunkSize = Math.ceil(usefulTitleEntries.length / chunkCount);
+    // Semantic-aware chunking: group consecutive entries whose dominant topic
+    // matches, so related visits (e.g. 5 crypto sites in a row) stay together
+    // instead of being arbitrarily split by index boundaries.
+    const groups = _buildSemanticChunks(usefulTitleEntries, MAX_CHUNKS);
 
-    for (let i = 0; i < chunkCount; i++) {
-      const chunkEntries = usefulTitleEntries.slice(i * chunkSize, (i + 1) * chunkSize);
-      if (chunkEntries.length === 0) continue;
+    for (const group of groups) {
+      if (group.length === 0) continue;
 
-      const chunkWeight = chunkEntries.reduce((s, e) => s + e.weight, 0) / chunkEntries.length;
-      const chunkTitleText = chunkEntries.map(e => e.title).slice(0, 30).join('; ');
+      const chunkWeight = group.reduce((s, e) => s + e.weight, 0) / group.length;
+      const chunkTitleText = group.map(e => e.title).slice(0, 30).join('; ');
 
       if (chunkTitleText && domainText) {
         chunks.push({
@@ -278,10 +278,29 @@ async function classifyBrowsing(domains, titles, recencyWeights = []) {
 
     totalWeight += chunkWeight;
     
-    // CRITICAL FIX: ONNX Runtime WASM Error Code 6 protection
+    // CRITICAL FIX: ONNX Runtime WASM Error Code 6 protection.
+    // Prefer sentence boundaries (.;!?) to avoid cutting mid-sentence, which
+    // degrades embedding quality. Falls back to word boundary if no sentence end found.
     if (text.length > 500) {
       text = text.substring(0, 500);
-      text = text.substring(0, Math.max(text.lastIndexOf(' '), text.lastIndexOf(';'))) + '...';
+      // Try sentence-ending punctuation first (preserves semantic units)
+      const sentenceEnd = Math.max(
+        text.lastIndexOf('. '),
+        text.lastIndexOf('; '),
+        text.lastIndexOf('! '),
+        text.lastIndexOf('? ')
+      );
+      if (sentenceEnd > 200) {
+        // Good sentence boundary found in the latter half — cut there
+        text = text.substring(0, sentenceEnd + 1);
+      } else {
+        // No clean sentence boundary — fall back to last space/semicolon
+        const wordEnd = Math.max(text.lastIndexOf(' '), text.lastIndexOf(';'));
+        if (wordEnd > 200) {
+          text = text.substring(0, wordEnd) + '...';
+        }
+        // else: keep the full 500 chars (rare, means one giant unbroken token)
+      }
     }
 
     console.log(`[EAX BG] Pass ${i+1}/${chunks.length} input length:`, text.length, 'chars');
@@ -310,11 +329,19 @@ async function classifyBrowsing(domains, titles, recencyWeights = []) {
 
   if (maxRaw < NOISE_THRESHOLD) return [0, 0, 0, 0, 0];
 
-  // Softmax instead of max-relative scaling:
-  // - avoids forcing the top category to ~100 when evidence gaps are small
-  // - produces a smoother distribution over the 5 categories
-  const SOFTMAX_TEMPERATURE = 0.1; // lower => peaky; higher => flatter
-  const exps = rawScores.map(s => Math.exp(s / SOFTMAX_TEMPERATURE));
+  // Vector embeddings from sentence transformers often group tightly (e.g. 0.11 to 0.16).
+  // We use Z-score standardization to normalize the spread. This allows the softmax
+  // to behave consistently regardless of whether the raw similarities were squashed or spread.
+  const mean = rawScores.reduce((a, b) => a + b, 0) / 5;
+  const variance = rawScores.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / 5;
+  const std = Math.sqrt(variance) || 1;
+
+  const zScores = rawScores.map(s => (s - mean) / std);
+
+  // Softmax on Z-scores.
+  // T=0.6 sharpens the distribution, beautifully separating top interests from noise.
+  const SOFTMAX_TEMPERATURE = 0.6;
+  const exps = zScores.map(z => Math.exp(z / SOFTMAX_TEMPERATURE));
   const sumExp = exps.reduce((a, b) => a + b, 0) || 1;
 
   const vector = exps.map(e => Math.round((e / sumExp) * 100));
@@ -396,6 +423,65 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return false;
   }
 });
+
+// ── Semantic Chunking ────────────────────────────────────────────
+// Groups consecutive title entries by dominant topic so semantically
+// related visits stay together across chunk boundaries.
+//
+// Strategy: assign each title a rough topic tag via keyword matching,
+// then greedily merge consecutive same-topic runs. If we end up with
+// more groups than maxChunks, merge the smallest adjacent pair.
+function _buildSemanticChunks(entries, maxChunks) {
+  // Lightweight keyword-based topic assignment (no ML needed here —
+  // this is just for chunking, not scoring)
+  const TOPIC_KEYWORDS = [
+    /* 0: crypto  */ /\b(crypt|bitcoin|btc|eth|blockchain|web3|defi|nft|token|swap|wallet|solana|metamask|uniswap)\b/i,
+    /* 1: ai      */ /\b(ai|artificial|gpt|llm|openai|claude|gemini|copilot|neural|machine learn|deep learn|chatbot)\b/i,
+    /* 2: finance */ /\b(finance|stock|invest|bank|loan|insurance|trading|market|portfolio|dividend|mutual fund)\b/i,
+    /* 3: gaming  */ /\b(game|gaming|esport|steam|twitch|playstation|xbox|nintendo|rpg|mmorpg|valorant|fortnite)\b/i,
+    /* 4: dev     */ /\b(github|stackoverflow|npm|pypi|docker|kubernetes|react|angular|python|rust|golang|devops|api|sdk|code|programming)\b/i,
+  ];
+
+  function assignTopic(title) {
+    for (let t = 0; t < TOPIC_KEYWORDS.length; t++) {
+      if (TOPIC_KEYWORDS[t].test(title)) return t;
+    }
+    return -1; // unknown
+  }
+
+  // Tag each entry
+  const tagged = entries.map(e => ({ ...e, topic: assignTopic(e.title) }));
+
+  // Greedily group consecutive same-topic entries
+  const groups = [];
+  let current = [tagged[0]];
+  for (let i = 1; i < tagged.length; i++) {
+    if (tagged[i].topic === current[0].topic && tagged[i].topic !== -1) {
+      current.push(tagged[i]);
+    } else {
+      groups.push(current);
+      current = [tagged[i]];
+    }
+  }
+  groups.push(current);
+
+  // Merge smallest adjacent pairs until we're at or under maxChunks
+  while (groups.length > maxChunks) {
+    let minSize = Infinity;
+    let minIdx = 0;
+    for (let i = 0; i < groups.length - 1; i++) {
+      const combined = groups[i].length + groups[i + 1].length;
+      if (combined < minSize) {
+        minSize = combined;
+        minIdx = i;
+      }
+    }
+    groups[minIdx] = groups[minIdx].concat(groups[minIdx + 1]);
+    groups.splice(minIdx + 1, 1);
+  }
+
+  return groups;
+}
 
 // ── Utility ──────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
